@@ -101,8 +101,14 @@ the principal point, differs from image to image.
 **Zoom.** A flat port magnifies the scene, so the corrected image uses focal
 length `zoom · (fx, fy)`. With `correction.zoom: null` the zoom is chosen
 automatically: the value in [1.3, 1.55] that best approximates the refracted
-projection at `z0_fixed` by a pinhole, while keeping the whole underwater image
-inside the frame. The chosen value is written to the calibration file.
+projection at `z0_fixed` by a pinhole. The chosen value is written to the
+calibration file.
+
+**Canvas.** By default (`correction.fit_canvas: true`) the output is sized to
+hold the whole corrected image, so it can differ from the source size, and the
+principal point in the calibration file moves accordingly. With
+`fit_canvas: false` the output keeps the source size, and the automatic zoom is
+restricted to values that keep the whole underwater image inside that frame.
 
 **Lens distortion.** If any of `k1, k2, p1, p2` is non-zero, the raw images are
 assumed to be distorted and the distortion is removed in the same warp.

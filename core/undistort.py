@@ -38,28 +38,63 @@ def forward_map(P2, ray_water, depth, fx, fy, cx, cy):
     return map_x, map_y
 
 
-def invert_map(map_x, map_y, H, W, step=4):
+def invert_map(map_x, map_y, H, W, step=4, origin=(0.0, 0.0)):
     """Inverts a forward map by linear interpolation over a subsampled grid (every `step` px).
 
+    map_x, map_y give, per source pixel, its position in the corrected image plane. The
+    inverse is evaluated on an H x W output canvas whose pixel (0, 0) sits at corrected-plane
+    coordinate `origin`; (0, 0) with the source size is the source frame itself. The last
+    source row and column are always sites, so the hull reaches the source border.
     Pixels outside the convex hull of the forward map are NaN.
     """
-    u_s = np.arange(0, W, step)
-    v_s = np.arange(0, H, step)
+    src_h, src_w = map_x.shape
+    u_s = np.unique(np.append(np.arange(0, src_w, step), src_w - 1))
+    v_s = np.unique(np.append(np.arange(0, src_h, step), src_h - 1))
     ug_s, vg_s = np.meshgrid(u_s, v_s)
 
     src = np.stack([map_x[np.ix_(v_s, u_s)].ravel(),
                      map_y[np.ix_(v_s, u_s)].ravel()], axis=1)
-    ug_full, vg_full = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32))
+    finite = np.all(np.isfinite(src), axis=1)
+    src, ug_s, vg_s = src[finite], ug_s.ravel()[finite], vg_s.ravel()[finite]
 
-    undist_x = griddata(src, ug_s.ravel().astype(np.float32), (ug_full, vg_full), method='linear')
-    undist_y = griddata(src, vg_s.ravel().astype(np.float32), (ug_full, vg_full), method='linear')
+    x0, y0 = origin
+    ug_full, vg_full = np.meshgrid(np.arange(W, dtype=np.float32) + x0,
+                                   np.arange(H, dtype=np.float32) + y0)
+
+    undist_x = griddata(src, ug_s.astype(np.float32), (ug_full, vg_full), method='linear')
+    undist_y = griddata(src, vg_s.astype(np.float32), (ug_full, vg_full), method='linear')
     return undist_x.astype(np.float32), undist_y.astype(np.float32)
 
 
-def build_undistort_map_closed_form(P2, ray_water, depth, fx, fy, cx, cy, H, W, zoom=None):
-    """Undistortion map for cv2.remap: corrected pixel -> underwater pixel."""
+def zoom_forward_map(map_x, map_y, cx, cy, zoom):
+    """Scales a forward map about (cx, cy) by zoom (None: unchanged).
+
+    Computed in float64 so the result does not depend on whether zoom is a Python
+    or a NumPy float.
+    """
+    if zoom is None:
+        return map_x, map_y
+    return ((map_x.astype(np.float64) - cx) * float(zoom) + cx,
+            (map_y.astype(np.float64) - cy) * float(zoom) + cy)
+
+
+def forward_map_canvas(map_x, map_y):
+    """Smallest canvas holding every finite point of a forward map, as (W, H, origin)."""
+    finite = np.isfinite(map_x) & np.isfinite(map_y)
+    if not np.any(finite):
+        raise ValueError("Forward map has no finite entries; cannot size a canvas.")
+    x_min, x_max = np.floor(map_x[finite].min()), np.ceil(map_x[finite].max())
+    y_min, y_max = np.floor(map_y[finite].min()), np.ceil(map_y[finite].max())
+    return int(x_max - x_min) + 1, int(y_max - y_min) + 1, (float(x_min), float(y_min))
+
+
+def build_undistort_map_closed_form(P2, ray_water, depth, fx, fy, cx, cy, H, W, zoom=None,
+                                    origin=(0.0, 0.0)):
+    """Undistortion map for cv2.remap: corrected pixel -> underwater pixel.
+
+    The map covers an H x W canvas with pixel (0, 0) at corrected-plane coordinate
+    `origin` (see invert_map).
+    """
     map_x, map_y = forward_map(P2, ray_water, depth, fx, fy, cx, cy)
-    if zoom is not None:
-        map_x = (map_x - cx) * zoom + cx
-        map_y = (map_y - cy) * zoom + cy
-    return invert_map(map_x, map_y, H, W)
+    map_x, map_y = zoom_forward_map(map_x, map_y, cx, cy, zoom)
+    return invert_map(map_x, map_y, H, W, origin=origin)

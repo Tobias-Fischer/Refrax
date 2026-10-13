@@ -32,6 +32,8 @@ paths:
 
 correction:
   z0_fixed: 1.0           # scene depth for fixed-depth mode and the zoom search
-  zoom: null              # null = automatic (best in-bounds zoom at z0_fixed)
+  zoom: null              # null = automatic (best zoom at z0_fixed; in-bounds if fit_canvas is false)
+  fit_canvas: true        # true = size the output to hold the whole corrected image (principal
+                          # point shifts accordingly); false = clip to the source W x H
   step_size: 1            # process every n-th image
   crop_valid_bbox: true   # crop to the largest rectangle without invalid pixels

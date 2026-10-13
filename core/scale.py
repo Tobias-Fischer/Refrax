@@ -3,10 +3,12 @@
 A flat port magnifies the scene, so the corrected image is rendered as a
 pinhole camera with focal length zoom * (fx, fy). The zoom is the value in
 the search range that minimises the RMSE between the refracted projection
-and the zoomed pinhole projection, subject to every pixel of the underwater
-image landing inside the corrected frame.
+and the zoomed pinhole projection. With in_bounds, it is additionally required
+that every pixel of the underwater image lands inside the source-sized frame;
+without it (correction.fit_canvas), the output canvas grows to hold the image.
 """
 import numpy as np
+from scipy.optimize import minimize_scalar
 
 from core.optics import matrix_K
 from core.undistort import compute_housing_geometry, forward_map
@@ -50,11 +52,20 @@ def find_in_bounds_scale(map_x, map_y, s_values, rmse_values, W, H, cx, cy):
     return best_s, best_rmse
 
 
-def select_zoom(Z0, W, H, fx, fy, cx, cy, housing, search=ZOOM_SEARCH):
-    """Zoom for a fronto-parallel plane at depth Z0. Returns (zoom, rmse_px)."""
+def select_zoom(Z0, W, H, fx, fy, cx, cy, housing, search=ZOOM_SEARCH, in_bounds=True):
+    """Zoom for a fronto-parallel plane at depth Z0. Returns (zoom, rmse_px).
+
+    in_bounds=False returns the unconstrained lowest-RMSE zoom, found by a bounded
+    scalar minimisation over the search range rather than on its sample grid.
+    """
     _, K_inv = matrix_K(fx, fy, cx, cy)
     P2, ray_water = compute_housing_geometry(H, W, K_inv, **housing)
     map_x, map_y = forward_map(P2, ray_water, Z0, fx, fy, cx, cy)
+
+    if not in_bounds:
+        res = minimize_scalar(lambda s: sweep_zoom(map_x, map_y, cx, cy, [s])[0],
+                              bounds=search[:2], method='bounded')
+        return float(res.x), float(res.fun)
 
     s_values = np.linspace(*search)
     rmse_values = sweep_zoom(map_x, map_y, cx, cy, s_values)
@@ -62,6 +73,6 @@ def select_zoom(Z0, W, H, fx, fy, cx, cy, housing, search=ZOOM_SEARCH):
     if zoom is None:
         raise RuntimeError(
             f"No zoom in [{search[0]}, {search[1]}] keeps the image within {W}x{H}; "
-            "widen the search range or set correction.zoom in the config."
+            "widen the search range, set correction.zoom or correction.fit_canvas in the config."
         )
     return zoom, rmse

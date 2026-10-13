@@ -4,7 +4,8 @@ Usage:
     python remove_refraction.py configs/dataset.yaml [--overwrite]
 
 Every image in paths.rgb_dir is warped to a refraction-free pinhole image with
-focal length zoom * (fx, fy). Outputs:
+focal length zoom * (fx, fy). The output is sized to hold the whole corrected
+image (correction.fit_canvas, default), or has the source size. Outputs:
     <output_dir>/<name>.png  corrected image; cropped to the largest rectangle
                              without invalid pixels if correction.crop_valid_bbox,
                              otherwise BGRA with the validity mask as alpha
@@ -22,7 +23,8 @@ import numpy as np
 from core.config import load_config, camera_params, distortion_params, housing_params
 from core.optics import matrix_K, apply_radtan_distortion
 from core.scale import select_zoom
-from core.undistort import compute_housing_geometry, build_undistort_map_closed_form
+from core.undistort import (compute_housing_geometry, build_undistort_map_closed_form,
+                            forward_map, zoom_forward_map, forward_map_canvas)
 
 IMAGE_EXTS = ["*.jpg", "*.JPG", "*.jpeg", "*.JPEG", "*.png", "*.PNG",
               "*.bmp", "*.BMP", "*.tiff", "*.TIFF"]
@@ -44,19 +46,21 @@ def load_depth(name, depth_dir, W, H):
     return np.clip(depth, 1e-3, None)
 
 
-def make_map_builder(W, H, fx, fy, cx, cy, housing, distortion, zoom):
+def make_map_builder(W, H, fx, fy, cx, cy, housing, distortion, zoom, canvas=None):
     """Returns build_map(depth) -> (map_x, map_y), float32 maps for cv2.remap.
 
+    The maps cover canvas = (out_W, out_H, origin), the source frame by default.
     Pixels without a source are set to -1. If radtan distortion coefficients are
     non-zero, the map points into the distorted (raw) image.
     """
     _, K_inv = matrix_K(fx, fy, cx, cy)
     P2, ray_water = compute_housing_geometry(H, W, K_inv, **housing)
     apply_radtan = any(d != 0.0 for d in distortion)
+    out_W, out_H, origin = canvas if canvas is not None else (W, H, (0.0, 0.0))
 
     def build_map(depth):
         map_x, map_y = build_undistort_map_closed_form(
-            P2, ray_water, depth, fx, fy, cx, cy, H, W, zoom=zoom)
+            P2, ray_water, depth, fx, fy, cx, cy, out_H, out_W, zoom=zoom, origin=origin)
 
         if apply_radtan:
             x_dist, y_dist = apply_radtan_distortion(
@@ -67,6 +71,33 @@ def make_map_builder(W, H, fx, fy, cx, cy, housing, distortion, zoom):
                 np.nan_to_num(map_y, nan=-1).astype(np.float32))
 
     return build_map
+
+
+def fit_canvas(W, H, fx, fy, cx, cy, housing, distortion, zoom, z0):
+    """Canvas (out_W, out_H, origin) holding the whole image corrected at depth z0.
+
+    Starts from the bounding box of the zoomed forward map, with one pixel of slack
+    for the interpolation hull, then shrinks to the valid pixels of the map built on
+    it. origin is the source-frame coordinate of the canvas' pixel (0, 0).
+    """
+    _, K_inv = matrix_K(fx, fy, cx, cy)
+    P2, ray_water = compute_housing_geometry(H, W, K_inv, **housing)
+    map_x, map_y = zoom_forward_map(*forward_map(P2, ray_water, z0, fx, fy, cx, cy),
+                                    cx, cy, zoom)
+    out_W, out_H, (x0, y0) = forward_map_canvas(map_x, map_y)
+    out_W, out_H, x0, y0 = out_W + 2, out_H + 2, x0 - 1.0, y0 - 1.0
+    if out_W > 8 * W or out_H > 8 * H:
+        raise ValueError(f"fit_canvas: corrected image would be {out_W}x{out_H} for a "
+                         f"{W}x{H} source; check the housing parameters and zoom ({zoom}).")
+
+    build_map = make_map_builder(W, H, fx, fy, cx, cy, housing, distortion, zoom,
+                                 canvas=(out_W, out_H, (x0, y0)))
+    valid = compute_valid_mask(*build_map(z0), W, H) > 0
+    rows, cols = np.flatnonzero(valid.any(axis=1)), np.flatnonzero(valid.any(axis=0))
+    if len(rows) == 0:
+        raise ValueError("fit_canvas: the corrected image has no valid pixel.")
+    return (int(cols[-1] - cols[0] + 1), int(rows[-1] - rows[0] + 1),
+            (x0 + float(cols[0]), y0 + float(rows[0])))
 
 
 def compute_valid_mask(map_x, map_y, W, H):
@@ -141,23 +172,31 @@ def main():
     z0_fixed = corr["z0_fixed"]
     step_size = corr.get("step_size", 1)
     crop_valid_bbox = corr.get("crop_valid_bbox", False)
+    fit = corr.get("fit_canvas", True)
     zoom = corr.get("zoom")
 
     if zoom is None:
         print(f"Finding optimal zoom at Z0={z0_fixed}...")
-        zoom, zoom_rmse = select_zoom(z0_fixed, W, H, fx, fy, cx, cy, housing)
-        print(f"Best scale in bounds = {zoom:.4f}")
+        zoom, zoom_rmse = select_zoom(z0_fixed, W, H, fx, fy, cx, cy, housing,
+                                      in_bounds=not fit)
+        print(f"Best scale{'' if fit else ' in bounds'} = {zoom:.4f}")
         print(f"RMSE = {zoom_rmse:.4f} px")
     else:
         print(f"Using zoom from config = {zoom:.4f}")
 
+    canvas = (W, H, (0.0, 0.0))
+    if fit:
+        canvas = fit_canvas(W, H, fx, fy, cx, cy, housing, distortion, zoom, z0_fixed)
+        print(f"Fitted canvas: {canvas[0]}x{canvas[1]}, origin=({canvas[2][0]:.0f}, "
+              f"{canvas[2][1]:.0f}) in the source frame")
+
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(mask_dir, exist_ok=True)
-    build_map = make_map_builder(W, H, fx, fy, cx, cy, housing, distortion, zoom)
+    build_map = make_map_builder(W, H, fx, fy, cx, cy, housing, distortion, zoom, canvas)
 
     rgb_paths = find_rgb_paths(rgb_dir, step_size)
     print(f"Found {len(rgb_paths)} images (step={step_size}), "
-          f"crop_valid_bbox={crop_valid_bbox}, "
+          f"fit_canvas={fit}, crop_valid_bbox={crop_valid_bbox}, "
           f"radtan={any(d != 0.0 for d in distortion)}")
 
     if depth_dir is None:
@@ -167,15 +206,15 @@ def main():
         cv2.imwrite(f"{mask_dir}/mask.png", fixed_mask)
         print(f"Saved shared mask: {mask_dir}/mask.png")
 
-        out_W, out_H = W, H
+        out_W, out_H, (ox, oy) = canvas
         out_fx, out_fy = fx * zoom, fy * zoom
-        out_cx, out_cy = cx, cy
+        out_cx, out_cy = cx - ox, cy - oy
         fixed_box = None
         if crop_valid_bbox:
             fixed_box = largest_valid_rectangle(fixed_mask)
             y0, y1, x0, x1 = fixed_box
             out_W, out_H = x1 - x0, y1 - y0
-            out_cx, out_cy = cx - x0, cy - y0
+            out_cx, out_cy = out_cx - x0, out_cy - y0
             print(f"Inscribed valid rectangle: rows[{y0}:{y1}], cols[{x0}:{x1}] "
                   f"({out_W}x{out_H}, no invalid pixels)")
             print(f"Adjusted intrinsics for cropped output: "
