@@ -9,6 +9,9 @@ remove-refraction = "python remove_refraction.py"
 visualise-refraction = "python visualise_refraction.py"
 planarity = "python evaluation/planarity.py"
 test = "pytest tests -q"
+render-refraction = "python render_refraction.py"
+validate-sim = "python -m sim.validate configs/dataset.yaml --figures docs/figures --json docs/figures/sim_validation.json"
+test-sim = "python -m sim.validate configs/dataset.yaml --quick"
 
 [dependencies]
 python = ">=3.10"
