@@ -16,15 +16,17 @@ image (correction.fit_canvas, default), or has the source size. Outputs:
 import argparse
 import glob
 import os
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 
 import cv2
 import numpy as np
 
 from core.config import load_config, camera_params, distortion_params, housing_params
-from core.optics import matrix_K, apply_radtan_distortion
+from core.rectangle import largest_valid_rectangle
 from core.scale import select_zoom
-from core.undistort import (compute_housing_geometry, build_undistort_map_closed_form,
-                            forward_map, zoom_forward_map, forward_map_canvas)
+from core.undistort import (InverseMapper, forward_map_analytic, zoom_forward_map,
+                            forward_map_canvas)
 
 IMAGE_EXTS = ["*.jpg", "*.JPG", "*.jpeg", "*.JPEG", "*.png", "*.PNG",
               "*.bmp", "*.BMP", "*.tiff", "*.TIFF"]
@@ -51,38 +53,20 @@ def make_map_builder(W, H, fx, fy, cx, cy, housing, distortion, zoom, canvas=Non
 
     The maps cover canvas = (out_W, out_H, origin), the source frame by default.
     Pixels without a source are set to -1. If radtan distortion coefficients are
-    non-zero, the map points into the distorted (raw) image.
+    non-zero, the map points into the distorted (raw) image. depth is a scalar or a
+    per-source-pixel depth map (H x W).
     """
-    _, K_inv = matrix_K(fx, fy, cx, cy)
-    P2, ray_water = compute_housing_geometry(H, W, K_inv, **housing)
-    apply_radtan = any(d != 0.0 for d in distortion)
-    out_W, out_H, origin = canvas if canvas is not None else (W, H, (0.0, 0.0))
+    mapper = InverseMapper(W, H, fx, fy, cx, cy, housing, zoom, canvas)
 
     def build_map(depth):
-        map_x, map_y = build_undistort_map_closed_form(
-            P2, ray_water, depth, fx, fy, cx, cy, out_H, out_W, zoom=zoom, origin=origin)
-
-        if apply_radtan:
-            x_dist, y_dist = apply_radtan_distortion(
-                (map_x - cx) / fx, (map_y - cy) / fy, *distortion)
-            map_x, map_y = x_dist * fx + cx, y_dist * fy + cy
-
-        return (np.nan_to_num(map_x, nan=-1).astype(np.float32),
-                np.nan_to_num(map_y, nan=-1).astype(np.float32))
+        return mapper.remap_maps(depth, distortion)
 
     return build_map
 
 
-def fit_canvas(W, H, fx, fy, cx, cy, housing, distortion, zoom, z0):
-    """Canvas (out_W, out_H, origin) holding the whole image corrected at depth z0.
-
-    Starts from the bounding box of the zoomed forward map, with one pixel of slack
-    for the interpolation hull, then shrinks to the valid pixels of the map built on
-    it. origin is the source-frame coordinate of the canvas' pixel (0, 0).
-    """
-    _, K_inv = matrix_K(fx, fy, cx, cy)
-    P2, ray_water = compute_housing_geometry(H, W, K_inv, **housing)
-    map_x, map_y = zoom_forward_map(*forward_map(P2, ray_water, z0, fx, fy, cx, cy),
+def _fit_canvas(W, H, fx, fy, cx, cy, housing, distortion, zoom, z0):
+    """fit_canvas, also returning the remap maps at z0 cropped to the canvas."""
+    map_x, map_y = zoom_forward_map(*forward_map_analytic(W, H, fx, fy, cx, cy, housing, z0),
                                     cx, cy, zoom)
     out_W, out_H, (x0, y0) = forward_map_canvas(map_x, map_y)
     out_W, out_H, x0, y0 = out_W + 2, out_H + 2, x0 - 1.0, y0 - 1.0
@@ -92,12 +76,26 @@ def fit_canvas(W, H, fx, fy, cx, cy, housing, distortion, zoom, z0):
 
     build_map = make_map_builder(W, H, fx, fy, cx, cy, housing, distortion, zoom,
                                  canvas=(out_W, out_H, (x0, y0)))
-    valid = compute_valid_mask(*build_map(z0), W, H) > 0
+    mx, my = build_map(z0)
+    valid = compute_valid_mask(mx, my, W, H) > 0
     rows, cols = np.flatnonzero(valid.any(axis=1)), np.flatnonzero(valid.any(axis=0))
     if len(rows) == 0:
         raise ValueError("fit_canvas: the corrected image has no valid pixel.")
-    return (int(cols[-1] - cols[0] + 1), int(rows[-1] - rows[0] + 1),
-            (x0 + float(cols[0]), y0 + float(rows[0])))
+    r0, r1, c0, c1 = rows[0], rows[-1] + 1, cols[0], cols[-1] + 1
+    canvas = (int(c1 - c0), int(r1 - r0), (x0 + float(c0), y0 + float(r0)))
+    # The maps of the cropped canvas are a crop of these (same grid, integer offset).
+    maps = (np.ascontiguousarray(mx[r0:r1, c0:c1]), np.ascontiguousarray(my[r0:r1, c0:c1]))
+    return canvas, maps
+
+
+def fit_canvas(W, H, fx, fy, cx, cy, housing, distortion, zoom, z0):
+    """Canvas (out_W, out_H, origin) holding the whole image corrected at depth z0.
+
+    Starts from the bounding box of the zoomed forward map, with one pixel of slack
+    for the interpolation hull, then shrinks to the valid pixels of the map built on
+    it. origin is the source-frame coordinate of the canvas' pixel (0, 0).
+    """
+    return _fit_canvas(W, H, fx, fy, cx, cy, housing, distortion, zoom, z0)[0]
 
 
 def compute_valid_mask(map_x, map_y, W, H):
@@ -107,37 +105,6 @@ def compute_valid_mask(map_x, map_y, W, H):
         (map_y >= 0) & (map_y <= H - 1)
     )
     return np.where(valid, 255, 0).astype(np.uint8)
-
-
-def largest_valid_rectangle(mask):
-    """Largest axis-aligned rectangle of non-zero mask pixels, as (y0, y1, x0, x1).
-
-    Row-by-row largest-rectangle-in-histogram; falls back to the whole image.
-    """
-    H, W = mask.shape
-    valid = mask > 0
-
-    height = np.zeros(W, dtype=np.int32)
-    best_area = 0
-    best_box = (0, H, 0, W)
-
-    for y in range(H):
-        height = np.where(valid[y], height + 1, 0)
-
-        stack = []  # (start_x, h)
-        for x in range(W + 1):
-            h = height[x] if x < W else 0
-            start = x
-            while stack and stack[-1][1] > h:
-                s_x, s_h = stack.pop()
-                area = s_h * (x - s_x)
-                if area > best_area:
-                    best_area = area
-                    best_box = (y - s_h + 1, y + 1, s_x, x)
-                start = s_x
-            stack.append((start, h))
-
-    return best_box
 
 
 def write_calibration(path, W, H, fx, fy, cx, cy, zoom):
@@ -155,6 +122,8 @@ def main():
     parser.add_argument("config", help="Path to config YAML file")
     parser.add_argument("--overwrite", action="store_true",
                         help="Recompute images whose output already exists")
+    parser.add_argument("--workers", type=int, default=min(8, os.cpu_count() or 1),
+                        help="Threads for image reading, warping and PNG writing")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -184,9 +153,10 @@ def main():
     else:
         print(f"Using zoom from config = {zoom:.4f}")
 
-    canvas = (W, H, (0.0, 0.0))
+    canvas, fixed_map = (W, H, (0.0, 0.0)), None
     if fit:
-        canvas = fit_canvas(W, H, fx, fy, cx, cy, housing, distortion, zoom, z0_fixed)
+        canvas, fit_maps = _fit_canvas(W, H, fx, fy, cx, cy, housing, distortion, zoom, z0_fixed)
+        fixed_map = fit_maps if depth_dir is None else None
         print(f"Fitted canvas: {canvas[0]}x{canvas[1]}, origin=({canvas[2][0]:.0f}, "
               f"{canvas[2][1]:.0f}) in the source frame")
 
@@ -201,7 +171,8 @@ def main():
 
     if depth_dir is None:
         print(f"Single depth mode (Z0={z0_fixed}) — computing undistortion map once")
-        fixed_map = build_map(z0_fixed)
+        if fixed_map is None:
+            fixed_map = build_map(z0_fixed)
         fixed_mask = compute_valid_mask(*fixed_map, W, H)
         cv2.imwrite(f"{mask_dir}/mask.png", fixed_mask)
         print(f"Saved shared mask: {mask_dir}/mask.png")
@@ -222,36 +193,18 @@ def main():
 
         write_calibration(calib_path, out_W, out_H, out_fx, out_fy, out_cx, out_cy, zoom)
 
-    for rgb_path in rgb_paths:
-        name = os.path.splitext(os.path.basename(rgb_path))[0]
-        out_path = f"{output_dir}/{name}.png"
-        if os.path.exists(out_path) and not args.overwrite:
-            print(f"Exists: {name}.png → skip (use --overwrite to recompute)")
-            continue
-
+    def warp_and_save(job):
+        """Reads, warps and writes one image (runs in a worker thread; cv2 releases the GIL)."""
+        rgb_path, name, out_path, maps, mask, box, mask_path = job
         img = cv2.imread(rgb_path)
         if img is None:
-            print(f"Unreadable: {rgb_path} → skip")
-            continue
+            return f"Unreadable: {rgb_path} → skip"
         if img.shape[:2] != (H, W):
-            print(f"Size {img.shape[1]}x{img.shape[0]} != camera {W}x{H}: {name} → skip")
-            continue
-
-        if depth_dir is None:
-            (map_x, map_y), mask, box = fixed_map, fixed_mask, fixed_box
-        else:
-            depth = load_depth(name, depth_dir, W, H)
-            if depth is None:
-                print(f"No depth: {name} → skip")
-                continue
-            map_x, map_y = build_map(depth)
-            mask = compute_valid_mask(map_x, map_y, W, H)
-            cv2.imwrite(f"{mask_dir}/{name}.png", mask)
-            box = largest_valid_rectangle(mask) if crop_valid_bbox else None
-
-        corrected = cv2.remap(img, map_x, map_y, cv2.INTER_LINEAR,
+            return f"Size {img.shape[1]}x{img.shape[0]} != camera {W}x{H}: {name} → skip"
+        if mask_path is not None:
+            cv2.imwrite(mask_path, mask)
+        corrected = cv2.remap(img, maps[0], maps[1], cv2.INTER_LINEAR,
                               borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-
         if box is not None:
             # Every pixel inside the inscribed rectangle is valid, so no alpha is needed.
             y0, y1, x0, x1 = box
@@ -259,9 +212,40 @@ def main():
         else:
             out = cv2.cvtColor(corrected, cv2.COLOR_BGR2BGRA)
             out[..., 3] = mask
-
         cv2.imwrite(out_path, out)
-        print(f"Saved: {name}.png ({out.shape[1]}x{out.shape[0]}, {out.shape[2]} channels)")
+        return f"Saved: {name}.png ({out.shape[1]}x{out.shape[0]}, {out.shape[2]} channels)"
+
+    def jobs():
+        """Per-image work items, in order. Depth-map mode builds each map here, in the main
+        thread (the map kernel is itself parallel), while workers do the image I/O."""
+        for rgb_path in rgb_paths:
+            name = os.path.splitext(os.path.basename(rgb_path))[0]
+            out_path = f"{output_dir}/{name}.png"
+            if os.path.exists(out_path) and not args.overwrite:
+                yield f"Exists: {name}.png → skip (use --overwrite to recompute)"
+                continue
+            if depth_dir is None:
+                yield (rgb_path, name, out_path, fixed_map, fixed_mask, fixed_box, None)
+                continue
+            depth = load_depth(name, depth_dir, W, H)
+            if depth is None:
+                yield f"No depth: {name} → skip"
+                continue
+            maps = build_map(depth)
+            mask = compute_valid_mask(*maps, W, H)
+            box = largest_valid_rectangle(mask) if crop_valid_bbox else None
+            yield (rgb_path, name, out_path, maps, mask, box, f"{mask_dir}/{name}.png")
+
+    # Bounded pipeline: at most 2 * workers images in flight; messages printed in order.
+    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+        pending = deque()
+        for job in jobs():
+            pending.append(job if isinstance(job, str) else pool.submit(warp_and_save, job))
+            while pending and (isinstance(pending[0], str) or len(pending) > 2 * args.workers):
+                item = pending.popleft()
+                print(item if isinstance(item, str) else item.result())
+        for item in pending:
+            print(item if isinstance(item, str) else item.result())
 
     print("Done.")
 

@@ -8,10 +8,9 @@ that every pixel of the underwater image lands inside the source-sized frame;
 without it (correction.fit_canvas), the output canvas grows to hold the image.
 """
 import numpy as np
-from scipy.optimize import minimize_scalar
 
 from core.optics import matrix_K
-from core.undistort import compute_housing_geometry, forward_map
+from core.undistort import forward_map_analytic
 
 ZOOM_SEARCH = (1.3, 1.55, 80)  # (min, max, number of samples)
 
@@ -52,27 +51,63 @@ def find_in_bounds_scale(map_x, map_y, s_values, rmse_values, W, H, cx, cy):
     return best_s, best_rmse
 
 
+class _ZoomStats:
+    """RMSE(s) of sweep_zoom in closed form: with d = map - c and e = grid - c (finite map
+    entries only), mean |s d - e|^2 = s^2 <d.d> - 2 s <d.e> + <e.e>, a quadratic in s, so the
+    sweep and the scalar minimisation need three sums instead of a pass over the image per s.
+    """
+
+    def __init__(self, map_x, map_y, cx, cy):
+        H, W = map_x.shape
+        # Same rounding as sweep_zoom on the float32 map: d = float32(map) - c in float32.
+        dx = (map_x.astype(np.float32) - np.float32(cx)).astype(np.float64)
+        dy = (map_y.astype(np.float32) - np.float32(cy)).astype(np.float64)
+        ex = np.arange(W, dtype=np.float64)[None, :] - cx
+        ey = np.arange(H, dtype=np.float64)[:, None] - cy
+        ok = np.isfinite(dx) & np.isfinite(dy)
+        dx, dy = np.where(ok, dx, 0.0), np.where(ok, dy, 0.0)
+        n = ok.sum()
+        self.dd = ((dx * dx).sum() + (dy * dy).sum()) / n
+        self.de = ((dx * ex).sum() + (dy * ey).sum()) / n
+        self.ee = (np.where(ok, ex * ex, 0).sum() + np.where(ok, ey * ey, 0).sum()) / n
+        # Extremes of d over finite entries decide the in-bounds test for any s > 0.
+        self.ext = (dx[ok].min(), dx[ok].max(), dy[ok].min(), dy[ok].max())
+
+    def rmse(self, s):
+        s = np.asarray(s, dtype=np.float64)
+        return np.sqrt(np.maximum(s * s * self.dd - 2 * s * self.de + self.ee, 0.0))
+
+    def in_bounds(self, s, W, H, cx, cy):
+        dx_min, dx_max, dy_min, dy_max = self.ext
+        return (dx_min * s + cx >= 0) and (dx_max * s + cx <= W - 1) and \
+               (dy_min * s + cy >= 0) and (dy_max * s + cy <= H - 1)
+
+
 def select_zoom(Z0, W, H, fx, fy, cx, cy, housing, search=ZOOM_SEARCH, in_bounds=True):
     """Zoom for a fronto-parallel plane at depth Z0. Returns (zoom, rmse_px).
 
-    in_bounds=False returns the unconstrained lowest-RMSE zoom, found by a bounded
-    scalar minimisation over the search range rather than on its sample grid.
+    in_bounds=False returns the unconstrained lowest-RMSE zoom over the search range
+    rather than on its sample grid. Same result as the per-pixel sweep (sweep_zoom / find_in_bounds_scale) from closed-form
+    sums over the analytic forward map.
     """
-    _, K_inv = matrix_K(fx, fy, cx, cy)
-    P2, ray_water = compute_housing_geometry(H, W, K_inv, **housing)
-    map_x, map_y = forward_map(P2, ray_water, Z0, fx, fy, cx, cy)
+    map_x, map_y = forward_map_analytic(W, H, fx, fy, cx, cy, housing, Z0)
+    stats = _ZoomStats(map_x, map_y, cx, cy)
 
     if not in_bounds:
-        res = minimize_scalar(lambda s: sweep_zoom(map_x, map_y, cx, cy, [s])[0],
-                              bounds=search[:2], method='bounded')
-        return float(res.x), float(res.fun)
+        # RMSE(s)^2 is a convex quadratic: its bounded minimiser is the clipped vertex
+        # (what scipy's bounded minimize_scalar converges to, to ~1e-11 here).
+        zoom = float(np.clip(stats.de / stats.dd, search[0], search[1]))
+        return zoom, float(stats.rmse(zoom))
 
     s_values = np.linspace(*search)
-    rmse_values = sweep_zoom(map_x, map_y, cx, cy, s_values)
-    zoom, rmse = find_in_bounds_scale(map_x, map_y, s_values, rmse_values, W, H, cx, cy)
+    rmse_values = stats.rmse(s_values)
+    zoom, rmse = None, np.inf
+    for s, r in zip(s_values, rmse_values):
+        if stats.in_bounds(s, W, H, cx, cy) and r < rmse:
+            zoom, rmse = s, r
     if zoom is None:
         raise RuntimeError(
             f"No zoom in [{search[0]}, {search[1]}] keeps the image within {W}x{H}; "
             "widen the search range, set correction.zoom or correction.fit_canvas in the config."
         )
-    return zoom, rmse
+    return zoom, float(rmse)

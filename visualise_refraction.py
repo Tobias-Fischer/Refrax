@@ -17,7 +17,7 @@ from matplotlib.colors import LinearSegmentedColormap
 from core.config import load_config, camera_params, housing_params
 from core.optics import matrix_K
 from core.scale import select_zoom
-from core.undistort import compute_housing_geometry, forward_map, invert_map
+from core.undistort import compute_housing_geometry, forward_map, InverseMapper
 
 BOARD_COLS, BOARD_ROWS, SQUARE_SIZE = 10, 10, 0.1
 
@@ -77,7 +77,7 @@ def main():
 
     P2, ray_water = compute_housing_geometry(H, W, K_inv, **housing)
     fwd_x, fwd_y = forward_map(P2, ray_water, Z0, fx, fy, cx, cy)
-    map_u, map_v = invert_map((fwd_x - cx) * zoom + cx, (fwd_y - cy) * zoom + cy, H, W)
+    map_u, map_v = InverseMapper(W, H, fx, fy, cx, cy, housing, zoom).build(Z0)
 
     disparity = np.sqrt((map_u - u_grid) ** 2 + (map_v - v_grid) ** 2)
     rmse = np.sqrt(np.nanmean(disparity ** 2))
