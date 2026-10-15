@@ -33,8 +33,8 @@ def export(args):
     fx, fy, cx, cy, k1, k2, p1, p2 = th[6:14]
     with open(os.path.join(args.out, "cameras.txt"), "w") as f:
         f.write("# Camera list with one line of data per camera:\n")
-        f.write(f"1 OPENCV {W} {H} {fx!r} {fy!r} {cx + 0.5!r} {cy + 0.5!r} {k1!r} {k2!r} "
-                f"{p1!r} {p2!r} FLATPORT 0 0 1 {hs['d0']!r} {hs['tglass']!r} "
+        f.write(f"1 OPENCV {W} {H} {fx:.10g} {fy:.10g} {cx + 0.5:.10g} {cy + 0.5:.10g} {k1:.10g} {k2:.10g} "
+                f"{p1:.10g} {p2:.10g} FLATPORT 0 0 1 {hs['d0']!r} {hs['tglass']!r} "
                 f"{hs['mu_a']!r} {hs['mu_g']!r} {hs['mu_w']!r}\n")
     # images: rewrite keypoints of observations (and all other keypoints) to raw
     from tilt.model import raw_from_corrected

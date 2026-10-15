@@ -53,6 +53,13 @@ bench-remove-gpu = "python benchmarks/bench_gpu.py configs/dataset.yaml"
 refraction-uncertainty = "python refraction_uncertainty.py"
 test-uncertainty = "pytest tests/test_uncertainty.py -q"
 uncertainty-analysis = "python uncertainty/sensitivity.py && python uncertainty/mc_validate.py && python uncertainty/figures.py"
+# port-tilt estimation in a refractive BA (docs/explore_tilt.md)
+test-tilt = "pytest tests/test_tilt.py -q"
+tilt-identifiability = "python tilt/identifiability.py"
+tilt-synthetic = "python tilt/synthetic.py"
+tilt-real = "python tilt/real.py"
+tilt-feedback = "python tilt/feedback.py"
+tilt-analysis = "python tilt/identifiability.py && python tilt/synthetic.py && python tilt/figures.py"
 
 [feature.depth.tasks]
 bench-depth-anything = "python benchmarks/bench_depth_anything.py"

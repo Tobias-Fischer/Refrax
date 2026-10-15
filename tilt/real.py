@@ -136,6 +136,8 @@ def main():
     ap.add_argument("--threads", type=int, default=2)
     ap.add_argument("--save-model", action="store_true")
     ap.add_argument("--tag", default="", help="suffix of the output json")
+    ap.add_argument("--point-subsample", type=float, default=1.0,
+                    help="random fraction of the 3-D points to use (large models)")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     cfg = load_config(args.config)
@@ -148,6 +150,9 @@ def main():
         half = set(order[: len(order) // 2] if args.images == "first"
                    else order[len(order) // 2:])
         sel &= np.isin(m["ci"], list(half))
+    if args.point_subsample < 1.0:
+        keep_p = np.random.default_rng(0).random(len(m["X"])) < args.point_subsample
+        sel &= keep_p[m["pj"]]
     # keep points with >= 2 observations
     cnt = np.bincount(m["pj"][sel], minlength=len(m["X"]))
     sel &= cnt[m["pj"]] >= 2
