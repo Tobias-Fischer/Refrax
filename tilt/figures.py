@@ -34,7 +34,8 @@ def synthetic(path):
              "oracle"]
     labels = ["Refrax + pinhole BA (today)", "Refrax with est. tilt + pinhole BA",
               "refractive BA, no tilt", "refractive BA + tilt", "oracle (true params)"]
-    fig, axes = plt.subplots(1, 2 * len(d), figsize=(5.2 * len(d) * 2, 3.6))
+    fig, axes = plt.subplots(len(d), 2, figsize=(11, 3.8 * len(d)))
+    axes = np.atleast_2d(axes).ravel()
     for si, (kind, dd) in enumerate(d.items()):
         rows = dd["rows"]
         tilts = sorted({r["tilt"] for r in rows})
