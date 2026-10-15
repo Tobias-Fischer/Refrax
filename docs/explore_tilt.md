@@ -14,7 +14,39 @@ Code: `tilt/` (Python prototype), `tests/test_tilt.py`, `configs/flatport/`; C++
 
 ## TL;DR
 
-@@TLDR@@
+1. **Prior art.** Upstream COLMAP (4.2.1, our patched tree) has **no** refractive camera
+   models. She et al.'s *Refractive COLMAP* (FLATPORT/DOMEPORT, refines port normal + d0) is
+   a COLMAP-3.10 fork, not upstreamed, and the Refrax paper already showed that its full
+   joint refractive SfM is unreliable. I built it only to cross-check our estimate with its
+   bundle adjuster (agrees to 0.01° for the same parameterisation) and did not adopt it.
+2. **Formulation.** Keep Refrax's pinhole SfM; map every corrected keypoint back exactly to
+   the raw image and minimise a closed-form *back-projection* flat-port residual
+   (water ray at the point's own depth vs. the 3-D point, whitened to raw pixels) over
+   poses, points, in-air K and the two tilt angles (d0 optional). Python prototype with
+   exact Schur-LM + posterior covariance (`tilt/`); C++ Ceres cost in colmap-uncertainty
+   branch `port-tilt`, usable from `bundle_adjuster`, pycolmap and the mapper
+   (`--flatport_config`); both agree to 0.0007°; 162/162 COLMAP tests pass.
+3. **Identifiability.** The tilt is ~0.25·f·δ of principal-point shift (|corr| 0.87–0.94
+   with cy/cx) plus a non-paraxial, field-dependent residue; free camera rotations cost
+   5–10× in σ, and the field of view is the lever (central 40 % of the image → 5–15× worse),
+   not the distance. With 0.5 px noise a full GoPro frame gives σ ≈ 0.02–0.04°.
+4. **Synthetic.** Tilt recovered to ≈0.05° (formal σ 0.02°, too optimistic because other
+   housing parameters are mis-specified). 3-D error at 1° / 2° tilt on a reef survey:
+   22 / 43 mm (today) → 4.7 / 7.2 mm (refractive BA + tilt); two-stage re-correction with the
+   estimated tilt: 10.5 / 12 mm. On a planar tank the tilt matters much less than the exact
+   per-point depth.
+5. **gopro10 tank.** **θx ≈ +0.48°, θy ≈ −0.21° (|tilt| ≈ 0.5°)**, formal σ 0.007°, but
+   realistic uncertainty **±0.2–0.3°**: halves of the sequence give (0.23, −0.39) and (0.69,
+   +0.09), freeing the in-air distortion gives (0.13, −0.27); independent features (z0 =
+   0.4 m model) reproduce 0.47 / −0.22, five starts from ±2° converge to the same point. It
+   explains the +10 px principal-point drift of the pinhole pipeline, but **board planarity
+   does not change** (0.151 → 0.152 %, re-corrected two-stage 0.155 → 0.155 %).
+6. **Lizard Island.** θ ≈ (+0.08, −0.28)° with the paper's camera, but undetermined (0.3–0.9°)
+   without an in-air calibration; d0 is not identifiable (→ −5 cm); the tilt does not
+   explain the 1.9 m dome.
+7. **Recommendation:** estimate the tilt once per housing on a well-conditioned sequence
+   (two-stage, only θx, θy + K free), feed `n_port` back into Refrax; worth it for tilts
+   ≳ 1° and 3-D scenes; improve the in-air calibration first.
 
 ---
 
@@ -371,12 +403,86 @@ export-patch` would turn it into `patches/0002-*.patch`.
   Refrax correction to 1e-8 px; DefaultBundleAdjuster with flat-port options recovers
   (0.8°, −1.3°) from corrected keypoints of a synthetic dataset, and stock BA cannot fit it).
 
-@@CPPRES@@
+**Results with the C++ path** (gopro10, `refrax-work/tilt/gopro10_z1/cpp_ba`, `mapper/`;
+logs `refrax-work/tilt/logs/cpp_ba*.log`, `mapper_*.log`):
+
+| run | θx [°] | θy [°] | in-air fx, cx, cy | time | board RMSE % / κ |
+| --- | --- | --- | --- | --- | --- |
+| Python prototype, global BA from the z0 = 1 m model (K + tilt) | 0.4758 | −0.2094 | 919.03, 962.20, 542.95 | 650 s | 0.152 / −0.0020 |
+| **C++ via pycolmap**, same model, same settings (Huber 2 px) | **0.4761** | **−0.2087** | 919.06, 962.20, 542.94 | **47 s** | 0.152 / −0.0020 |
+| stock mapper (PINHOLE, f and c refined), same database | – | – | – | 139 s | 0.154 / +0.0027 |
+| **mapper with `--flatport_config`** (globals in global BAs only) | 0.352 | −0.223 | 919.02, 962.15, 543.92 | 877 s | 0.153 / +0.0023 |
+| + final flat-port BA of that model (C++) | 0.361 | −0.225 | | 46 s | 0.153 / +0.0023 |
+
+* The C++ cost reproduces the Python prototype to 0.0007° / 0.03 px — two independent
+  implementations (torch autodiff + own Schur-LM vs Ceres autodiff + COLMAP's BA).
+* The mapper integration works end to end (128/128 images, 583k observations, 394 flat-port
+  BAs). A first version that also refined the globals in the *local* BAs drifted (fx 932,
+  θ = (−0.02, −0.83)° after 46 images); holding them in local BAs (default,
+  `refine_in_local_ba 0`) fixed that. Mapping is 6× slower (each global BA ~30 s on 2
+  threads: autodiff of the flat-port cost), and the result is the same reconstruction
+  quality as the stock mapper on this scene. The estimate differs from the one on the
+  stock-mapper model by 0.12° in θx — another face of the ±0.2–0.3° systematic spread.
+* So for production, the **two-stage** route is preferable: map as today, run one
+  flat-port BA (`colmap bundle_adjuster --flatport_config`, 47 s), and either keep that
+  model or re-correct the images with the estimated `n_port` for the next sequences.
 
 ## 6. Recommendations and next steps
 
-@@REC@@
+1. **Do not adopt full refractive SfM** (Refractive COLMAP). Joint estimation of everything
+   is what the Refrax paper found unreliable, and §3 shows why: the tilt is ~90 % correlated
+   with the principal point and partly with rotations and tangential distortion.
+2. **Estimate the tilt once per housing/camera seating, two-stage**: (a) map with Refrax as
+   today on a calibration-friendly sequence — **wide field of view used to the corners,
+   varied camera orientations (hand-held, not a pure nadir survey), close and 3-D scene,
+   many views** — (b) one refractive BA with exactly θx, θy + in-air fx, fy, cx, cy free
+   (d0, μ_w, glass, distortion fixed), (c) put the estimated `n_port` (and in-air K) into
+   the Refrax config and re-correct. The multi-start check shows this small problem has a
+   single basin.
+3. **Trust the estimate only to ±0.2–0.3°** unless the in-air lens calibration is good:
+   on gopro10 the estimate depends on the distortion model (0.35°) and on which half of the
+   sequence is used (0.45°); the formal σ (0.007°) is 30–60× too small. Report the spread
+   over subsets / model choices, not the BA covariance. A better in-air calibration
+   (especially p1, p2, cx, cy, ideally recalibrated in Linear mode with the same firmware)
+   is the prerequisite for a better tilt.
+4. **Expect little gain on a planar tank at ~1 m with a ≤0.5° tilt** (gopro10: board
+   planarity unchanged). Expect real gains for 3-D scenes and larger tilts (synthetic reef:
+   22 → 5 mm at 1°, 43 → 7 mm at 2°). A tilt ≥1° is worth estimating; below ~0.3° it is in the
+   noise of the in-air calibration.
+5. **If poses are constrained** (rig with calibrated extrinsics, IMU/gravity prior), the tilt
+   becomes 5–10× better determined — the constant-rotation confound is what limits SfM.
+6. **Never free d0 in BA on far scenes** (Lizard: d0 → −5 cm). Keep it nominal or measure it.
+7. Lizard Island: tilt is not the cause of the 1.9 m dome; that needs mapping-time
+   constraints. Without an in-air calibration the Lizard tilt is undetermined (0.3–0.9°).
+
+**Next steps.** (i) A proper in-air recalibration of the gopro10 (GoPro Linear) and a
+dedicated in-water calibration sequence (hand-held, varied orientation, board + 3-D
+structure) to pin the tilt to < 0.1°. (ii) Mahalanobis/robust handling of the declared-camera
+refit in the mapper and a speed-up of the C++ cost (analytic Jacobians for the on-axis-like
+case; ~6× mapper overhead now). (iii) Export `refine_*` results straight into a Refrax
+config (`n_port` from θ via `tilt.model.n_port_of`). (iv) Depth-map mode: the raw-keypoint
+mapping needs the per-pixel depth; the BA residual itself already uses exact point depth.
 
 ## 7. Reproduce
 
-@@REPRO@@
+```bash
+# Refrax-tilt (pixi env gpu: torch)
+pixi run -e gpu test-tilt                          # 4 tests
+pixi run -e gpu tilt-identifiability               # §3, ~5 min
+pixi run -e gpu tilt-synthetic                     # §4a, ~40 min at 2 threads (--trials 5)
+W=/Users/fischert/robot/refrax-work
+pixi run -e gpu tilt-real $W/uncertainty/gopro10_z1/ba/0_input \
+    $W/depth/gopro10/z1_c0mm/it0_fixed/calibration.yaml configs/dataset.yaml 1.0 OUT \
+    --hulls $W/uncertainty/gopro10_z1/board_hulls.npz --scale 0.11347 --variants K K+tilt
+pixi run -e gpu tilt-feedback MODEL CALIB configs/dataset.yaml 1.0 OUT/real_tilt_all.json FB --hulls H
+python tilt/figures.py
+# cross-check with Refractive COLMAP: tilt/kiel_export.py, refrax-work/tilt/queue1.sh
+# all runs of this study: refrax-work/tilt/queue*.sh (serial, 2 threads)
+
+# colmap-uncertainty, branch port-tilt
+JOBS=2 pixi run build && pixi run build-pycolmap
+ctest --test-dir build -R flatport                 # 7 tests (162/162 total pass)
+colmap bundle_adjuster --input_path M --output_path O --flatport_config configs/flatport/gopro10_z1.txt
+colmap mapper ... --flatport_config configs/flatport/gopro10_z1.txt
+pixi run --manifest-path ../colmap-uncertainty/pixi.toml python tilt/pycolmap_flatport_ba.py M CFG O --metric-scale 0.11347
+```
