@@ -39,7 +39,8 @@ def parse_args():
                     help="render focal length / (paraxial magnification * f); 2 = sharp corners")
     ap.add_argument("--z-near", type=float, default=0.2, help="closest scene depth (m)")
     ap.add_argument("--rt-subframes", type=int, default=8)
-    ap.add_argument("--headless", action="store_true", default=True)
+    ap.add_argument("--headless", action=argparse.BooleanOptionalAction, default=True,
+                    help="run without a window (--no-headless to watch the render)")
     return ap.parse_args()
 
 
