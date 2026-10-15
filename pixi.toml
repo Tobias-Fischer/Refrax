@@ -46,3 +46,10 @@ safetensors = "*"
 gpu = { features = ["gpu"], solve-group = "default" }
 cuda = { features = ["gpu", "cuda"] }
 depth = { features = ["gpu", "depth"], solve-group = "default" }
+
+[feature.gpu.tasks]
+test-gpu = "pytest tests/test_torch_remove.py -q"
+bench-remove-gpu = "python benchmarks/bench_gpu.py configs/dataset.yaml"
+
+[feature.depth.tasks]
+bench-depth-anything = "python benchmarks/bench_depth_anything.py"
