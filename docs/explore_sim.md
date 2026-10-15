@@ -228,7 +228,7 @@ On the first run, check:
 
 1. Run the Isaac Sim adapter on a Linux GPU box, then the OceanSim hook.
 2. Render a reef USD trajectory with ground-truth poses. Feed its output to Refrax plus COLMAP/VSLAM, which gives the paper a controlled, simulated version of the real-data experiments.
-3. Port `trace` to a Warp kernel: Isaac Sim ships Warp, so the post-process stays on the GPU.
+3. Port `trace` to a Warp kernel: Isaac Sim ships Warp, so the post-process stays on the GPU. *Done on branch `explore/gpu-render`: torch, Metal and Warp versions, 1.5 ms per 1080p frame on the M5 GPU; see `docs/explore_gpu_render.md`.*
 4. Add per-channel μw for dispersion, and a second depth layer for disocclusions.
 
 ## 7. Notes on the existing code and paper
