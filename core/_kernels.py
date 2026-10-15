@@ -203,33 +203,56 @@ def _resid(x, y, X, Y, R, P, cam, w_const, wmap, use_map):
     return Ax + Bx * w - X, Ay + By * w - Y
 
 
+@nb.njit(**_OPTS)
+def _jac_AB(x, y, R, P):
+    """Finite-difference Jacobians of A and B at (x, y): (dAx/dx, dAx/dy, dAy/dx, dAy/dy, same for B)."""
+    eps = 1e-6
+    Ax, Ay, Bx, By = _AB(x, y, R, P)
+    Axu, Ayu, Bxu, Byu = _AB(x + eps, y, R, P)
+    Axv, Ayv, Bxv, Byv = _AB(x, y + eps, R, P)
+    return ((Axu - Ax) / eps, (Axv - Ax) / eps, (Ayu - Ay) / eps, (Ayv - Ay) / eps,
+            (Bxu - Bx) / eps, (Bxv - Bx) / eps, (Byu - By) / eps, (Byv - By) / eps)
+
+
 @nb.njit(parallel=True, **_OPTS)
 def general_maps(Xs, Ys, R, P, cam, frame_px, w_const, wmap, use_map, x0c, y0c, g0,
                  tol, max_iter, dist, invalid, out_x, out_y):
-    """Tilted port: damped 2-D Newton per output pixel, paraxial initial guess."""
+    """Tilted port: per output pixel, Newton iteration on F(p, w(p)) = q.
+
+    Pixels are swept along rows; each starts from its left neighbour's solution and reuses
+    the neighbour's Jacobians of A and B (refreshed every 8 pixels or when convergence is
+    slow), so an iteration costs one evaluation of the model. Steps that increase the
+    residual are halved. Pixels that still fail (depth discontinuities) fall back to
+    bisection on inverse depth.
+    """
     w_lo = wmap.min()
     w_hi = wmap.max()
-    eps = 1e-6
     fx, fy = cam[0], cam[1]
     for i in nb.prange(Ys.shape[0]):
         Y = Ys[i]
-        px_ok = False
+        have_prev = False
         px = 0.0
         py = 0.0
+        age = 1 << 30
+        jA0 = jA1 = jA2 = jA3 = jB0 = jB1 = jB2 = jB3 = 0.0
         for j in range(Xs.shape[0]):
             X = Xs[j]
-            if px_ok:  # warm start from the left neighbour's solution
+            if have_prev:
                 x = px + (X - Xs[j - 1]) / g0
                 y = py
             else:
                 x = (X - x0c) / g0
                 y = (Y - y0c) / g0
-            rx, ry = _resid(x, y, X, Y, R, P, cam, w_const, wmap, use_map)
+            if age >= 8:
+                jA0, jA1, jA2, jA3, jB0, jB1, jB2, jB3 = _jac_AB(x, y, R, P)
+                age = 0
+            age += 1
             ok = False
-            for _ in range(max_iter):
+            r_prev = np.inf
+            xp = x
+            yp = y
+            for it in range(max_iter):
                 Ax, Ay, Bx, By = _AB(x, y, R, P)
-                Axu, Ayu, Bxu, Byu = _AB(x + eps, y, R, P)
-                Axv, Ayv, Bxv, Byv = _AB(x, y + eps, R, P)
                 if use_map:
                     w, gu, gv = _sample_w(wmap, fx * x + cam[2], fy * y + cam[3], True)
                     gx = gu * fx
@@ -238,39 +261,43 @@ def general_maps(Xs, Ys, R, P, cam, frame_px, w_const, wmap, use_map, x0c, y0c, 
                     w = w_const
                     gx = 0.0
                     gy = 0.0
-                j11 = ((Axu - Ax) + (Bxu - Bx) * w) / eps + Bx * gx
-                j12 = ((Axv - Ax) + (Bxv - Bx) * w) / eps + Bx * gy
-                j21 = ((Ayu - Ay) + (Byu - By) * w) / eps + By * gx
-                j22 = ((Ayv - Ay) + (Byv - By) * w) / eps + By * gy
-                det = j11 * j22 - j12 * j21
-                dx = -(j22 * rx - j12 * ry) / det
-                dy = -(-j21 * rx + j11 * ry) / det
-                r0 = math.hypot(rx, ry)
-                lam = 1.0
-                nx = x + dx
-                ny = y + dy
-                nrx, nry = _resid(nx, ny, X, Y, R, P, cam, w_const, wmap, use_map)
-                for _ in range(8):
-                    if math.hypot(nrx, nry) <= r0:
-                        break
-                    lam *= 0.5
-                    nx = x + lam * dx
-                    ny = y + lam * dy
-                    nrx, nry = _resid(nx, ny, X, Y, R, P, cam, w_const, wmap, use_map)
-                step = math.hypot(nx - x, ny - y)
-                x, y, rx, ry = nx, ny, nrx, nry
-                if not math.isfinite(step):
+                rx = Ax + Bx * w - X
+                ry = Ay + By * w - Y
+                rn = math.hypot(rx, ry)
+                if not math.isfinite(rn):
                     break
-                if step < tol and math.hypot(rx, ry) < tol:
+                if rn < 0.1 * tol:  # tol is in source px; output px are zoom x larger
                     ok = True
                     break
-            px_ok = ok
-            px = x
-            py = y
-            if not ok and use_map:
-                # Depth discontinuity: bisection on w, the root of w_map(p(w)) - w, where p(w)
-                # solves the constant-w problem (always bracketed by the depth range).
-                x, y, ok = _bisect_w(X, Y, x, y, R, P, cam, wmap, w_lo, w_hi, tol, max_iter)
+                if rn > r_prev:  # overshoot: halve the last step
+                    x = 0.5 * (x + xp)
+                    y = 0.5 * (y + yp)
+                    continue
+                if it == 3:  # slow: refresh the Jacobians here
+                    jA0, jA1, jA2, jA3, jB0, jB1, jB2, jB3 = _jac_AB(x, y, R, P)
+                    age = 1
+                r_prev = rn
+                j11 = jA0 + w * jB0 + Bx * gx
+                j12 = jA1 + w * jB1 + Bx * gy
+                j21 = jA2 + w * jB2 + By * gx
+                j22 = jA3 + w * jB3 + By * gy
+                det = j11 * j22 - j12 * j21
+                xp = x
+                yp = y
+                x -= (j22 * rx - j12 * ry) / det
+                y -= (-j21 * rx + j11 * ry) / det
+            have_prev = ok
+            if ok:
+                px = x
+                py = y
+            else:
+                age = 1 << 30
+                if use_map:
+                    # Depth discontinuity: bisection on w, the root of w_map(p(w)) - w, where
+                    # p(w) solves the constant-w problem (bracketed by the depth range).
+                    x = (X - x0c) / g0
+                    y = (Y - y0c) / g0
+                    x, y, ok = _bisect_w(X, Y, x, y, R, P, cam, wmap, w_lo, w_hi, tol, max_iter)
             if ok:
                 _finish(x, y, cam, frame_px, dist, out_x, out_y, i, j, invalid)
             else:

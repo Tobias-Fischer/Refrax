@@ -86,10 +86,16 @@ For every image in `paths.rgb_dir` this writes:
 | `<mask_dir>/mask.png` | validity mask (per image in depth-map mode) |
 | `<output_dir>/../new_calibration.yaml` | pinhole intrinsics of the corrected images (fixed-depth mode) |
 
-Existing outputs are skipped; pass `--overwrite` to recompute them.
+Existing outputs are skipped; pass `--overwrite` to recompute them. Images are
+read, warped and written by `--workers` threads (default: up to 8).
 
-**Method.** The pixel grid is traced forward through the housing onto the scene
-plane, and the resulting map is inverted by interpolation.
+**Method.** The housing maps an underwater pixel to the pinhole projection
+`A(p) + B(p) / Z` of the scene point it sees at depth `Z` (closed form, radially
+symmetric about the port normal). For every pixel of the corrected image, this
+equation is solved for the underwater pixel `p` by Newton iteration (1-D along
+the radius for a port normal on the optical axis), with the depth map sampled
+bilinearly, giving a map that is exact to ~1e-7 px. See
+[`docs/explore_speed.md`](docs/explore_speed.md).
 
 **Depth.** Flat-port refraction is depth-dependent. With `paths.depth_dir: null`
 the scene is assumed to lie at depth `correction.z0_fixed` and a single map is
@@ -158,7 +164,12 @@ print the metrics only.
 ├── remove_refraction.py       # Main refraction-removal script
 ├── visualise_refraction.py    # Synthetic checkerboard visualisation
 ├── configs/                   # Config with example values (GoPro 10)
-└── core/
-    ├── optics.py              # Ray tracing through the flat port
-    ├── undistort.py           # Refraction correction map
-    └── scale.py               # Automatic output scaling
+├── core/
+│   ├── optics.py              # Ray tracing through the flat port
+│   ├── flatport.py            # Closed-form housing model and its per-pixel inverse
+│   ├── _kernels.py            # Compiled (numba) versions of the inverse
+│   ├── undistort.py           # Refraction correction map
+│   ├── rectangle.py           # Largest valid rectangle (output crop)
+│   └── scale.py               # Automatic output scaling
+├── tests/                     # Regression tests against the original implementation
+└── benchmarks/                # Speed and accuracy benchmarks
