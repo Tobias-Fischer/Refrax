@@ -6,6 +6,7 @@ Usage:
     python render_refraction.py configs/dataset.yaml apply SIM_DIR [--depth-type z|range]
         SIM_DIR/pinhole/<name>.png + SIM_DIR/pinhole_depth/<name>.npy (metres) rendered with
         that camera -> SIM_DIR/underwater/<name>.png and SIM_DIR/underwater_depth/<name>.npy
+        [--device auto|cpu|mps|cuda] uses the torch renderer (pixi environment "gpu")
 
 The output camera is the config's camera (W, H, fx, fy, cx, cy, radtan distortion) behind
 its housing. The render camera has the same orientation as the real camera, and its optical
@@ -47,6 +48,8 @@ def main():
     ap.add_argument("--z-near", type=float, default=0.2)
     ap.add_argument("--centre", default="virtual", help="virtual | origin")
     ap.add_argument("--depth-type", default="z", choices=["z", "range"])
+    ap.add_argument("--device", default="numpy",
+                    help="numpy (default) | auto | cpu | mps | cuda: torch renderer (core/render_torch.py)")
     ap.add_argument("--spec", default=None, help="render_camera.yaml (default: SIM_DIR/render_camera.yaml if present)")
     args = ap.parse_args()
 
@@ -63,6 +66,17 @@ def main():
         print(f"Written {spec_path}")
         return
 
+    render = r.render
+    if args.device != "numpy":
+        from core.render_torch import TorchFlatPortRenderer, default_device
+        tr = TorchFlatPortRenderer(r, default_device() if args.device == "auto" else args.device)
+
+        def render(img, depth, depth_type):
+            x = img if img.dtype == np.uint8 else img.astype(np.float32)
+            uw, info = tr.render(x, depth, depth_type)
+            info = {k: v[0].cpu().numpy() for k, v in info.items() if k != "grid"}
+            return uw[0].cpu().numpy().astype(img.dtype), info
+
     out_rgb = os.path.join(args.sim_dir, "underwater")
     out_d = os.path.join(args.sim_dir, "underwater_depth")
     os.makedirs(out_rgb, exist_ok=True)
@@ -73,7 +87,7 @@ def main():
         depth = np.load(os.path.join(args.sim_dir, "pinhole_depth", name + ".npy"))
         if img.shape[:2] != (r.spec.H, r.spec.W) or depth.shape[:2] != (r.spec.H, r.spec.W):
             raise ValueError(f"{name}: render must be {r.spec.W}x{r.spec.H} (see plan)")
-        uw, info = r.render(img, depth.squeeze(), depth_type=args.depth_type)
+        uw, info = render(img, depth.squeeze(), depth_type=args.depth_type)
         cv2.imwrite(os.path.join(out_rgb, name + ".png"), uw)
         np.save(os.path.join(out_d, name + ".npy"),
                 np.where(info["valid"], info["Z"], np.nan).astype(np.float32))

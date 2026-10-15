@@ -12,6 +12,9 @@ test = "pytest tests -q"
 render-refraction = "python render_refraction.py"
 validate-sim = "python -m sim.validate configs/dataset.yaml --figures docs/figures --json docs/figures/sim_validation.json"
 test-sim = "python -m sim.validate configs/dataset.yaml --quick"
+test-render-gpu = { cmd = "python -m pytest tests -q", default-environment = "gpu" }
+validate-render-gpu = { cmd = "python -m sim.validate_torch configs/dataset.yaml --json docs/figures/gpu_validation.json", default-environment = "gpu" }
+bench-render-gpu = { cmd = "python -m sim.bench_render_gpu configs/dataset.yaml --json docs/figures/gpu_bench.json", default-environment = "gpu" }
 
 [dependencies]
 python = ">=3.10"
