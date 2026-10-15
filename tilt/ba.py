@@ -264,7 +264,9 @@ class RefracBA:
         # scale fixed (as in the solve); without fix_scale this still is the gauge choice
         keep = np.setdiff1d(np.arange(len(S)), [self._scale_coord()]) if nf else \
             np.arange(len(S))
-        Ci = np.linalg.inv(S[np.ix_(keep, keep)])
+        Sk = S[np.ix_(keep, keep)]
+        d = np.sqrt(np.maximum(np.diag(Sk), 1e-300))      # Jacobi scaling: conditioning
+        Ci = np.linalg.inv(Sk / np.outer(d, d)) / np.outer(d, d)
         L = self.lin
         a_ = L["a"]
         n_obs = len(a_)

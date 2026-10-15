@@ -88,7 +88,8 @@ def info(X, cams, th, geo, free, poses_known=False, fov=1.0):
     if poses_known:
         ba.linearize()
         Sm, _, _, _, _ = ba.normal_equations(0.0)
-        Cg = np.linalg.inv(Sm) * SIG ** 2
+        d = np.sqrt(np.diag(Sm))
+        Cg = np.linalg.inv(Sm / np.outer(d, d)) / np.outer(d, d) * SIG ** 2
     else:
         Cg = ba.covariance()
     sd = np.sqrt(np.diag(Cg))
