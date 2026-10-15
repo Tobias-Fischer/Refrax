@@ -304,7 +304,36 @@ planarity is unchanged within the ±0.01 % run-to-run spread of explore/uncertai
 
 ### 4c. Lizard Island
 
-@@LIZ@@
+Finished model of the Lizard Island agent (read only):
+`refrax-work/lizard/runs/paper_z4.7_c0.00mm_fixed` (476 frames 928×812, Refrax fixed depth
+z0 = 4.7 m with the paper's self-calibrated in-air camera f = 440.2, no distortion,
+d0 = 2 cm; 338k points). Refractive BA on a random 25 % of the points (531k observations),
+metric scale from the GPS alignment (4.653 m/unit), `refrax-work/tilt/lizard/`. Trajectory
+bending with explore/lizard's own evaluation (`tilt/lizard_sag.py` imports
+`Refrax-lizard/depth_aware/lizard_eval.py`; it reproduces the input's −1909 mm):
+
+| refractive BA variant | θx [°] | θy [°] | other | σ̂ [px] | sag along legs [mm] / κ_traj |
+| --- | --- | --- | --- | --- | --- |
+| input (Refrax + stock mapper) | – | – | – | – | −1909 / −0.160 |
+| K | 0 | 0 | f 441.0 | 0.506 | −1929 / −0.161 |
+| **K + tilt** | **+0.08 ± 0.005** | **−0.28 ± 0.004** | f 441.2, c (464.8, 404.8) | 0.504 | −1920 / −0.161 |
+| K + tilt + d0 | +0.16 | −0.38 | **d0 = −52 mm** (unphysical), f 452 | 0.504 | −2138 / −0.190 |
+| K + distortion + tilt | +0.32 | −0.80 | f 480, k1 0.039 (f–k1 trade-off) | 0.516 | −1674 / −0.137 |
+
+* With the paper's camera model the tilt comes out small, **≈0.3° (θx +0.08°, θy −0.28°)**,
+  but there is **no in-air calibration** for this camera: the in-air K is self-calibrated
+  from the same images. As soon as distortion is also free the tilt changes by 0.5° and the
+  focal length by 9 % — the parameters are not separable here, so the tilt is not
+  determined to better than ~0.5°.
+* **d0 is not identifiable at 4.7 m** (d0/Z ≈ 0.4 %): freeing it gives a negative distance.
+  This contradicts nothing in explore/lizard's "effective d0 = 5.5 cm" (a flatness fit of the
+  trajectory, i.e. a different, global criterion), but it shows that d0 must not be a free
+  BA parameter on such data.
+* **The 1.9 m dome is not caused by tilt.** Refining from the input model leaves the
+  sag at −1.92 m with or without tilt. The dome is a weak, near-gauge mode of the long
+  nadir survey (§3: parallel nadir views give little rotation diversity) that a local
+  refinement cannot leave; it has to be prevented at mapping time (GPS/pose priors, correct
+  depth model), not by a housing parameter.
 
 ## 5. Implementation in COLMAP (colmap-uncertainty, branch `port-tilt`)
 

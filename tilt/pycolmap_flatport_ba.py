@@ -12,8 +12,7 @@ correction described by FLATPORT_CONFIG (configs/flatport/*.txt). The BA is COLM
 DefaultBundleAdjuster with BundleAdjustmentOptions.flatport set: every keypoint is mapped
 back to the raw image and the flat-port reprojection error (port tilt, in-air intrinsics,
 optionally d0) replaces the pinhole one. Writes the refined model, the estimate and the
-marginal covariance of the housing block (ceres::Covariance through pyceres, if
-available) to OUT_DIR.
+to OUT_DIR.
 """
 import argparse
 import json
@@ -77,19 +76,8 @@ def main():
                metric_scale=float(st.last_metric_scale),
                declared_camera=list(map(float, next(iter(rec.cameras.values())).params)),
                termination=str(summary.termination_type))
-    # posterior covariance of the housing block (pyceres.Covariance, if exposed)
-    try:
-        import pyceres
-        problem = ba.problem
-        cov = pyceres.Covariance(pyceres.CovarianceOptions())
-        housing = st.housing  # same buffer as in the problem?
-        ok = cov.compute([housing], problem)
-        if ok:
-            C = np.asarray(cov.get_covariance_block(housing, housing))
-            # scale by the residual variance (raw px^2)
-            out["housing_cov_unscaled"] = C.tolist()
-    except Exception as e:  # noqa: BLE001
-        out["covariance_error"] = repr(e)
+    # (posterior covariance: use tilt/real.py; the housing block is not exposed as a
+    #  numpy view by the bindings, so pyceres.Covariance cannot address it)
     rec.write(args.out)
     with open(os.path.join(args.out, "flatport_ba.json"), "w") as f:
         json.dump(out, f, indent=1)
