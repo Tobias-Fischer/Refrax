@@ -68,6 +68,12 @@ def observations(X, cams, th, geo, fov=1.0):
 
 def info(X, cams, th, geo, free, poses_known=False, fov=1.0):
     ci, pj, u, used = observations(X, cams, th, geo, fov)
+    # drop views without observations (narrow field of view)
+    keep = np.unique(ci)
+    cmap = -np.ones(len(cams), int)
+    cmap[keep] = np.arange(len(keep))
+    ci = cmap[ci]
+    cams = [cams[k] for k in keep]
     R = np.stack([c[0] for c in cams])
     t = np.stack([c[1] for c in cams])
     decl = Decl(geo.f_out, geo.c_out, geo.R0, geo.mu_a)

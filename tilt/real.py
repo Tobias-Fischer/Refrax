@@ -136,6 +136,8 @@ def main():
     ap.add_argument("--threads", type=int, default=2)
     ap.add_argument("--save-model", action="store_true")
     ap.add_argument("--tag", default="", help="suffix of the output json")
+    ap.add_argument("--init-tilt", type=float, nargs=2, default=None,
+                    help="initial tilt_x tilt_y [deg] (multi-start convergence check)")
     ap.add_argument("--point-subsample", type=float, default=1.0,
                     help="random fraction of the 3-D points to use (large models)")
     args = ap.parse_args()
@@ -165,7 +167,8 @@ def main():
     ci, pj = cmap[m["ci"][sel]], pmap[m["pj"][sel]]
     R0, t0, X0 = m["R"][used_c], args.scale * m["t"][used_c], args.scale * m["X"][used_p]
     bids = None
-    out = dict(model=args.model, z0=args.z0, scale=args.scale, images=args.images, n_obs=int(sel.sum()),
+    out = dict(model=args.model, z0=args.z0, scale=args.scale, init_tilt=args.init_tilt,
+               point_subsample=args.point_subsample, images=args.images, n_obs=int(sel.sum()),
                n_images=int(len(used_c)), n_points=int(len(used_p)), variants={})
     if args.hulls:
         hulls = np.load(args.hulls, allow_pickle=True)["hulls"].item()
@@ -177,7 +180,10 @@ def main():
         free = VARIANTS[name]
         t_start = time.time()
         print(f"== {name}: free {free}", flush=True)
-        ba = RefracBA(R0, t0, X0, ci, pj, u[sel], geo.theta0.copy(), decl, free=free,
+        th_init = geo.theta0.copy()
+        if args.init_tilt is not None:
+            th_init[4:6] = np.radians(args.init_tilt)
+        ba = RefracBA(R0, t0, X0, ci, pj, u[sel], th_init, decl, free=free,
                       huber=args.huber, sigma_px=None, threads=args.threads)
         ba.solve(max_iter=40)
         sm = ba.summary()
