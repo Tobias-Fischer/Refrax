@@ -1,0 +1,24 @@
+# Flat-port BA options for colmap-uncertainty (branch port-tilt):
+#   colmap bundle_adjuster --flatport_config THIS ...   or   colmap mapper --flatport_config THIS ...
+# gopro10 (configs/dataset.yaml), Refrax fixed-depth correction at z0 = 1 m, crop_valid_bbox
+# (declared pinhole = the corrected images' calibration.yaml, Refrax pixel convention).
+declared_pinhole 1390.871585 1391.384149 849.324 483.85
+keypoint_offset -0.5
+correction_z0 1.0
+air_model OPENCV
+nominal_air_params 919.896 920.235 959.324 544.850 0.01749284 -0.00298329 0.00171351 0.00045356
+tilt_deg 0 0
+d0 0.02
+tglass 0.002
+mu_a 1.0
+mu_g 1.47
+mu_w 1.34
+# metres per model unit; -1: median observation depth = correction_z0
+metric_scale -1
+refine_tilt 1
+refine_d0 0
+refine_air_focal_length 1
+refine_air_principal_point 1
+refine_air_extra_params 0
+min_num_reg_images 10
+update_declared_camera 1

@@ -30,7 +30,7 @@ def skew(v):
 class RefracBA:
     def __init__(self, R, t, X, ci, pj, u, theta, decl, free=("tilt_x", "tilt_y"),
                  fixed_cams=(0,), huber=2.0, prior=None, sigma_px=1.0, threads=2,
-                 verbose=True):
+                 fix_scale=True, verbose=True):
         """R (nc,3,3) camera-from-world, t (nc,3), X (np,3), observations (ci, pj, u raw
         px), theta (14,), decl (tilt.model.Decl). free: names of free globals.
         prior: dict name -> (mean, sigma) Gaussian prior. sigma_px: keypoint noise used to
@@ -53,6 +53,20 @@ class RefracBA:
         self.sigma_px = sigma_px
         self.threads = threads
         self.verbose = verbose
+        # The metric scale is (weakly) observable through refraction only (d0, tglass in
+        # metres); by default it is held at the initial value (gauge-like constraint).
+        self.fix_scale = fix_scale
+        self._drop = self._scale_coord() if self.nf else None
+
+    def _scale_coord(self):
+        """Index (in the reduced vector) of the translation coordinate most affected by a
+        scaling of the scene about camera 0; fixing it removes the scale freedom."""
+        C = np.einsum("nji,nj->ni", self.R, -self.t)
+        c0 = C[min(self.fixed)]
+        idx = np.flatnonzero(self.slot >= 0)
+        dt = -np.einsum("nij,nj->ni", self.R[idx], C[idx] - c0)
+        a = np.unravel_index(np.argmax(np.abs(dt)), dt.shape)
+        return 6 * a[0] + 3 + a[1]
 
     # -- evaluation ------------------------------------------------------------------------
     def Pc(self, R=None, t=None, X=None, theta=None):
@@ -187,7 +201,12 @@ class RefracBA:
 
     def step(self, lam):
         S, rhs, E, Hpi, bp = self.normal_equations(lam)
-        dc = np.linalg.solve(S, rhs)
+        if self.fix_scale and self._drop is not None:
+            keep = np.setdiff1d(np.arange(len(S)), [self._drop])
+            dc = np.zeros(len(S))
+            dc[keep] = np.linalg.solve(S[np.ix_(keep, keep)], rhs[keep])
+        else:
+            dc = np.linalg.solve(S, rhs)
         dp = np.einsum("nij,nj->ni", Hpi, bp - (E.T @ dc).reshape(-1, 3))
         nf = self.nf
         R, t = self.R.copy(), self.t.copy()
@@ -200,7 +219,7 @@ class RefracBA:
         th[self.free] += dc[6 * nf:]
         return R, t, X, th, dc
 
-    def solve(self, max_iter=50, lam=1e-4, tol=1e-10):
+    def solve(self, max_iter=50, lam=1e-4, tol=1e-7):
         t0 = time.time()
         self.linearize()
         c = self.cost(self.R, self.t, self.X, self.theta)
@@ -219,7 +238,10 @@ class RefracBA:
                     g = ", ".join(f"{n}={self._fmt(n)}" for n in self.free_names)
                     print(f"  it {it:2d} cost {c:.6e} lam {lam:.1e} {g} "
                           f"({time.time() - t0:.0f}s)", flush=True)
-                if rel < tol:
+                dg = dc[6 * self.nf:]
+                small = (np.max(np.abs(dg) / np.maximum(np.abs(th[self.free]), 1e-3))
+                         if self.k else 0.0) < 1e-6
+                if rel < tol or (rel < 1e-5 and small):
                     break
             else:
                 lam *= 10
@@ -239,14 +261,9 @@ class RefracBA:
         self.linearize()
         S, _, _, _, _ = self.normal_equations(0.0)
         nf, k = self.nf, self.k
-        # scale gauge: the translation coordinate most affected by a scaling about cam 0
-        C = np.einsum("nji,nj->ni", self.R, -self.t)
-        c0 = C[min(self.fixed)]
-        idx = np.flatnonzero(self.slot >= 0)
-        dt = -np.einsum("nij,nj->ni", self.R[idx], C[idx] - c0)
-        a = np.unravel_index(np.argmax(np.abs(dt)), dt.shape)
-        drop = 6 * a[0] + 3 + a[1]
-        keep = np.setdiff1d(np.arange(len(S)), [drop])
+        # scale fixed (as in the solve); without fix_scale this still is the gauge choice
+        keep = np.setdiff1d(np.arange(len(S)), [self._scale_coord()]) if nf else \
+            np.arange(len(S))
         Ci = np.linalg.inv(S[np.ix_(keep, keep)])
         L = self.lin
         a_ = L["a"]
