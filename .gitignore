@@ -6,3 +6,6 @@ input/
 output/
 00/
 depth/
+
+# uncertainty analysis caches
+uncertainty/.*.npz
