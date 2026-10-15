@@ -50,6 +50,9 @@ depth = { features = ["gpu", "depth"], solve-group = "default" }
 [feature.gpu.tasks]
 test-gpu = "pytest tests/test_torch_remove.py -q"
 bench-remove-gpu = "python benchmarks/bench_gpu.py configs/dataset.yaml"
+refraction-uncertainty = "python refraction_uncertainty.py"
+test-uncertainty = "pytest tests/test_uncertainty.py -q"
+uncertainty-analysis = "python uncertainty/sensitivity.py && python uncertainty/mc_validate.py && python uncertainty/figures.py"
 
 [feature.depth.tasks]
 bench-depth-anything = "python benchmarks/bench_depth_anything.py"
