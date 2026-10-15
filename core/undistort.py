@@ -19,8 +19,15 @@ def compute_housing_geometry(H, W, K_inv, n_port, d0, tglass, mu_a, mu_g, mu_w):
     return P2, ray_water
 
 
-def forward_map(P2, ray_water, depth, fx, fy, cx, cy):
-    """Pinhole projection (fx, fy, cx, cy) of the point each underwater pixel sees at `depth`."""
+def forward_map(P2, ray_water, depth, fx, fy, cx, cy, center_z=0.0):
+    """Pinhole projection (fx, fy, cx, cy) of the point each underwater pixel sees at `depth`.
+
+    `depth` is Z along the optical axis, measured from the camera centre. The corrected
+    pinhole sits at (0, 0, center_z) on the optical axis: 0 is the camera centre (the
+    paper's choice); a negative value moves the virtual centre behind it, towards where
+    the refracted water rays (nearly) converge, which makes the map less depth-dependent
+    (see core/virtual_center.py and docs/explore_depth.md).
+    """
     Z = np.asarray(depth, dtype=np.float32)
     if Z.ndim == 0:
         Z = np.full(P2.shape[:2], float(Z), dtype=np.float32)
@@ -32,8 +39,9 @@ def forward_map(P2, ray_water, depth, fx, fy, cx, cy):
     Pw_x = P2[..., 0] + t * ray_water[..., 0]
     Pw_y = P2[..., 1] + t * ray_water[..., 1]
 
-    map_x = (fx * Pw_x / Z + cx).astype(np.float32)
-    map_y = (fy * Pw_y / Z + cy).astype(np.float32)
+    Zc = Z - np.float32(center_z)
+    map_x = (fx * Pw_x / Zc + cx).astype(np.float32)
+    map_y = (fy * Pw_y / Zc + cy).astype(np.float32)
     return map_x, map_y
 
 
@@ -75,22 +83,23 @@ def invert_map(map_x, map_y, H, W, step=4, origin=(0.0, 0.0)):
 _FWD_CACHE = {}
 
 
-def forward_map_analytic(W, H, fx, fy, cx, cy, housing, depth):
+def forward_map_analytic(W, H, fx, fy, cx, cy, housing, depth, center_z=0.0):
     """forward_map on the full source grid from the analytic model (core.flatport), float64.
 
-    Equal to forward_map(*compute_housing_geometry(...), depth, ...) up to rounding
+    Equal to forward_map(*compute_housing_geometry(...), depth, ..., center_z) up to rounding
     (forward_map additionally rounds to float32), without the per-pixel 3-D trace. depth is
-    a scalar. The last result is memoised (read-only arrays).
+    a scalar (from the camera centre). The last result is memoised (read-only arrays).
     """
     from core.flatport import FlatPort
-    key = (W, H, fx, fy, cx, cy, float(depth),
+    key = (W, H, fx, fy, cx, cy, float(depth), float(center_z),
            tuple((k, tuple(np.ravel(v))) for k, v in sorted(housing.items())))
     if key in _FWD_CACHE:  # select_zoom and fit_canvas both need the map at z0
         return _FWD_CACHE[key]
     x = (np.arange(W, dtype=np.float64) - cx) / fx
     y = (np.arange(H, dtype=np.float64) - cy) / fy
     X, Y = np.meshgrid(x, y)
-    Fx, Fy = FlatPort(**housing).forward(X, Y, 1.0 / float(depth))
+    model = FlatPort(**housing, center_z=center_z)
+    Fx, Fy = model.forward(X, Y, 1.0 / (float(depth) - float(center_z)))
     out = fx * Fx + cx, fy * Fy + cy
     for a in out:
         a.flags.writeable = False
@@ -122,13 +131,13 @@ def forward_map_canvas(map_x, map_y):
 
 
 def build_undistort_map_closed_form(P2, ray_water, depth, fx, fy, cx, cy, H, W, zoom=None,
-                                    origin=(0.0, 0.0)):
+                                    origin=(0.0, 0.0), center_z=0.0):
     """Undistortion map for cv2.remap: corrected pixel -> underwater pixel.
 
     The map covers an H x W canvas with pixel (0, 0) at corrected-plane coordinate
     `origin` (see invert_map).
     """
-    map_x, map_y = forward_map(P2, ray_water, depth, fx, fy, cx, cy)
+    map_x, map_y = forward_map(P2, ray_water, depth, fx, fy, cx, cy, center_z)
     map_x, map_y = zoom_forward_map(map_x, map_y, cx, cy, zoom)
     return invert_map(map_x, map_y, H, W, origin=origin)
 
@@ -151,12 +160,18 @@ class InverseMapper:
     bilinearly. Depth-independent set-up is done once in the constructor.
 
     backend: "numba" (fused parallel kernel), "numpy", or "auto" (numba if installed).
+
+    center_z: optical-axis position of the corrected pinhole (0 = camera centre; see
+    core/virtual_center.py). Depths passed to build / remap_maps are always measured from
+    the camera centre; internally the model works with Z - center_z (core.flatport).
     """
 
-    def __init__(self, W, H, fx, fy, cx, cy, housing, zoom=None, canvas=None, backend="auto"):
+    def __init__(self, W, H, fx, fy, cx, cy, housing, zoom=None, canvas=None, backend="auto",
+                 center_z=0.0):
         from core.flatport import FlatPort
         self.W, self.H, self.fx, self.fy, self.cx, self.cy = W, H, fx, fy, cx, cy
-        self.model = FlatPort(**housing)
+        self.center_z = float(center_z)
+        self.model = FlatPort(**housing, center_z=self.center_z)
         self.zoom = 1.0 if zoom is None else float(zoom)
         out_W, out_H, (ox, oy) = canvas if canvas is not None else (W, H, (0.0, 0.0))
         self.out_W, self.out_H = out_W, out_H
@@ -210,7 +225,7 @@ class InverseMapper:
         else:
             wmap = np.zeros((2, 2))
             w_ref = w_const = 1.0 / float(depth)
-        P = np.array([m.rg, m.rw, m.cg, m.cw, m.d0, m.tglass, m.dz])
+        P = np.array([m.rg, m.rw, m.cg, m.cw, m.d0, m.tglass, m.dz, m.cz])
         cam = np.array([self.fx, self.fy, self.cx, self.cy], dtype=np.float64)
         frame = np.array(self.frame)
         frame_px = np.array([self.W - 1.0, self.H - 1.0])
@@ -241,12 +256,21 @@ class InverseMapper:
     def build(self, depth):
         """(map_x, map_y), float64 source pixel coordinates (no lens distortion), NaN where
         the output pixel has no source."""
+        depth = self._shift(depth)
         if self.kernels is not None:
             return self._numba_maps(depth, None, np.float64, np.nan)
         return self._numpy_maps(depth)
 
+    def _shift(self, depth):
+        """Depth from the camera centre -> depth from the virtual centre (model input)."""
+        if self.center_z == 0.0:
+            return depth
+        d = np.asarray(depth, dtype=np.float64) - self.center_z
+        return float(d) if d.ndim == 0 else d
+
     def remap_maps(self, depth, distortion=None):
         """float32 maps for cv2.remap into the raw (radtan-distorted) image; -1 = invalid."""
+        depth = self._shift(depth)
         if self.kernels is not None:
             return self._numba_maps(depth, distortion, np.float32, -1.0)
         map_x, map_y = self._numpy_maps(depth)

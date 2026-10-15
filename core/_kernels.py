@@ -47,6 +47,7 @@ def _radial_f(rho, ex, ey, Rt, w_const, wmap, use_map, P, cam):
     s = rho * rho
     kg = rg / math.sqrt(1.0 + cg * s)
     kw = rw / math.sqrt(1.0 + cw * s)
+    dz = dz - P[7]  # virtual centre (core.flatport): exit point measured from z = c
     h = d0 + tg * kg - dz * kw
     dkw = kw / (1.0 + cw * s)
     dkg = kg / (1.0 + cg * s)
@@ -190,6 +191,7 @@ def _AB(x, y, R, P):
     pz = R[0, 2] * a * tx + R[1, 2] * a * ty + R[2, 2] * dz
     Ax = wx / wz
     Ay = wy / wz
+    pz -= P[7]  # virtual centre (core.flatport)
     return Ax, Ay, px - pz * Ax, py - pz * Ay
 
 

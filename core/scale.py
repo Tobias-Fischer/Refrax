@@ -83,14 +83,15 @@ class _ZoomStats:
                (dy_min * s + cy >= 0) and (dy_max * s + cy <= H - 1)
 
 
-def select_zoom(Z0, W, H, fx, fy, cx, cy, housing, search=ZOOM_SEARCH, in_bounds=True):
+def select_zoom(Z0, W, H, fx, fy, cx, cy, housing, search=ZOOM_SEARCH, in_bounds=True,
+                center_z=0.0):
     """Zoom for a fronto-parallel plane at depth Z0. Returns (zoom, rmse_px).
 
     in_bounds=False returns the unconstrained lowest-RMSE zoom over the search range
     rather than on its sample grid. Same result as the per-pixel sweep (sweep_zoom / find_in_bounds_scale) from closed-form
     sums over the analytic forward map.
     """
-    map_x, map_y = forward_map_analytic(W, H, fx, fy, cx, cy, housing, Z0)
+    map_x, map_y = forward_map_analytic(W, H, fx, fy, cx, cy, housing, Z0, center_z)
     stats = _ZoomStats(map_x, map_y, cx, cy)
 
     if not in_bounds:

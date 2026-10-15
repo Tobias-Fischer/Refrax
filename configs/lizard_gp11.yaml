@@ -1,0 +1,53 @@
+# GoPro HERO11 Black (8:7 photo mode, 5568x4872, used downscaled 6x to 928x812) behind the flat
+# port of the Lizard Island ASV (LIRS Mar 2024, South Palfrey 1, GoPro1). There is no in-air
+# calibration: the values below are SELF-CALIBRATED from the survey, following the paper
+# (docs/explore_lizard.md, section 3):
+#  camera   COLMAP on 476 raw underwater images with a refined OPENCV model gives
+#           f_w = (589.89, 590.44), c = (466.05, 404.77) (k1 = 0.315, k2 = 0.402 underwater).
+#           Paper's rule: f_air = f_w / mu_w, principal point kept, no lens distortion. (A Snell
+#           conversion of the full underwater model gives k1 = -0.008, i.e. the lens itself is
+#           nearly distortion-free, but it also reproduces the raw self-calibration's bend.)
+#  housing  nominal: d0 = 2 cm, tglass = 2 mm, mu_w = 1.34 (sea water).
+#  z0       chosen like the paper's Fig. 7 sweep, by trajectory flatness (the ASV keeps the
+#           camera at constant height): fixed-depth runs at 4.7 m (median of all SfM points) and
+#           2.0 m give a leg sag of -1.91 and -0.43 m, linear in 1/z0, zero at 1.72 m. This
+#           matches the typical depth of a frame (per-image median 1.9 m): many frames look at
+#           coral heads at 1.4-2.3 m, others at sand at ~5 m.
+# For depth-aware correction (paths.depth_dir) the same nominal housing is used; z0 then only
+# sets the output frame.
+
+camera:
+  W: 928
+  H: 812
+  fx: 440.2180
+  fy: 440.6268
+  cx: 466.0478
+  cy: 404.7711
+  k1: 0.000000
+  k2: 0.000000
+  p1: 0.000000
+  p2: 0.000000
+
+housing:
+  n_port: [0.0, 0.0, 1.0]
+  mu_a: 1.0
+  mu_g: 1.47
+  mu_w: 1.34
+  d0: 0.02
+  tglass: 0.002
+
+paths:
+  rgb_dir: "/Users/fischert/robot/refrax-work/lizard/raw928"
+  output_dir: "/Users/fischert/robot/refrax-work/lizard/corrected/images"
+  mask_dir: "/Users/fischert/robot/refrax-work/lizard/corrected/mask"
+  depth_dir: null
+
+correction:
+  z0_fixed: 1.7           # SELF-CALIBRATED: flattest trajectory (see header)
+  zoom: null
+  fit_canvas: true
+  step_size: 1
+  crop_valid_bbox: true
+  depth_crop: reference
+  virtual_center: 0.0
+  depth_range: [1.0, 8.0] # for virtual_center: auto (-11.28 mm)

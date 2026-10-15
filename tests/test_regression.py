@@ -211,7 +211,7 @@ def test_largest_valid_rectangle(backend):
 
 
 # --------------------------------------------------------------------------------------------
-@pytest.mark.parametrize("mode", ["fixed", "depth"])
+@pytest.mark.parametrize("mode", ["fixed", "depth", "depth_ref"])
 def test_cli_end_to_end(cam, tmp_path, mode):
     """remove_refraction.py on a tiny dataset; outputs compared with the reference pipeline."""
     c = cam
@@ -231,7 +231,9 @@ def test_cli_end_to_end(cam, tmp_path, mode):
     cfg["camera"].update(W=c["W"], H=c["H"], fx=c["fx"], fy=c["fy"], cx=c["cx"], cy=c["cy"])
     cfg["paths"] = dict(rgb_dir=str(rgb), output_dir=str(tmp_path / "out" / "corrected"),
                         mask_dir=str(tmp_path / "out" / "mask"),
-                        depth_dir=str(ddir) if mode == "depth" else None)
+                        depth_dir=str(ddir) if mode != "fixed" else None)
+    cfg["correction"]["depth_crop"] = "reference" if mode == "depth_ref" else "per_image"
+    cfg["correction"]["virtual_center"] = 0.0
     cfg_path = tmp_path / "cfg.yaml"
     cfg_path.write_text(yaml.safe_dump(cfg))
     subprocess.run([sys.executable, os.path.join(ROOT, "remove_refraction.py"), str(cfg_path),
@@ -243,17 +245,87 @@ def test_cli_end_to_end(cam, tmp_path, mode):
     out = tmp_path / "out"
     if mode == "fixed":
         assert (out / "mask" / "mask.png").exists()
+    if mode != "depth":  # per-image crops have no common calibration
         assert (out / "new_calibration.yaml").exists()
+    mx0, my0 = build(c["z0"])
+    ref_box = ref.largest_valid_rectangle(ref.compute_valid_mask(mx0, my0, c["W"], c["H"]))
     for k in range(3):
         depth = c["z0"] if mode == "fixed" else rr.load_depth(f"img{k}", str(ddir), c["W"], c["H"])
         mx, my = build(depth)
         mask = ref.compute_valid_mask(mx, my, c["W"], c["H"])
-        y0, y1, x0, x1 = ref.largest_valid_rectangle(mask)
+        # depth_crop: reference keeps the crop of z0 for every image (one calibration)
+        y0, y1, x0, x1 = ref_box if mode == "depth_ref" else ref.largest_valid_rectangle(mask)
         img = cv2.imread(str(rgb / f"img{k}.png"))
         expected = cv2.remap(img, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)[y0:y1, x0:x1]
         got = cv2.imread(str(out / "corrected" / f"img{k}.png"))
         assert got.shape == expected.shape
         mse = np.mean((got.astype(float) - expected.astype(float)) ** 2)
         assert 10 * np.log10(255 ** 2 / max(mse, 1e-12)) > 45
-        if mode == "depth":
+        if mode != "fixed":
             assert (out / "mask" / f"img{k}.png").exists()
+
+
+# -- virtual centre (correction.virtual_center) -----------------------------------------------
+@pytest.mark.parametrize("tilt", [(0, 0), (5, 0)])
+def test_virtual_center_forward_matches_ray_tracer(cam, tilt):
+    """FlatPort(center_z=c) with w = 1/(Z - c) equals the ray tracer projected from (0, 0, c)."""
+    from core.undistort import forward_map, forward_map_analytic
+    c = cam
+    housing = tilted(c["housing"], *tilt) if tilt != (0, 0) else c["housing"]
+    _, K_inv = matrix_K(c["fx"], c["fy"], c["cx"], c["cy"])
+    P2, ray_water = ref.compute_housing_geometry(c["H"], c["W"], K_inv, **housing)
+    for cz in (-0.0103, 0.004):
+        for Z in (0.4, 1.0, 5.0):
+            t = (Z - P2[..., 2]) / ray_water[..., 2]
+            rx = c["fx"] * (P2[..., 0] + t * ray_water[..., 0]) / (Z - cz) + c["cx"]
+            ry = c["fy"] * (P2[..., 1] + t * ray_water[..., 1]) / (Z - cz) + c["cy"]
+            ax, ay = forward_map_analytic(c["W"], c["H"], c["fx"], c["fy"], c["cx"], c["cy"],
+                                          housing, Z, cz)
+            assert np.abs(ax - rx).max() < 1e-9 and np.abs(ay - ry).max() < 1e-9
+            fx_, fy_ = forward_map(P2.astype(np.float32), ray_water.astype(np.float32), Z,
+                                   c["fx"], c["fy"], c["cx"], c["cy"], cz)
+            assert np.abs(fx_ - rx).max() < 1e-2
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("tilt", [(0, 0), (5, 0)])
+@pytest.mark.parametrize("kind", ["const", "smooth", "step"])
+def test_virtual_center_inverse_ground_truth(cam, backend, tilt, kind):
+    """Inverse maps with a virtual centre trace forward (ray tracer, projected from c) onto
+    their output pixel, for constant and per-pixel depth measured from the camera centre."""
+    c = cam
+    cz = -0.0103
+    housing = tilted(c["housing"], *tilt) if tilt != (0, 0) else c["housing"]
+    zoom, _ = select_zoom(c["z0"], c["W"], c["H"], c["fx"], c["fy"], c["cx"], c["cy"], housing,
+                          in_bounds=False, center_z=cz)
+    canvas = rr.fit_canvas(c["W"], c["H"], c["fx"], c["fy"], c["cx"], c["cy"], housing,
+                           (0, 0, 0, 0), zoom, c["z0"], cz)
+    depth = {"const": c["z0"], "smooth": smooth_depth(c["W"], c["H"]),
+             "step": step_depth(c["W"], c["H"])}[kind]
+    mapper = InverseMapper(c["W"], c["H"], c["fx"], c["fy"], c["cx"], c["cy"], housing, zoom,
+                           canvas, backend=backend, center_z=cz)
+    nx, ny = mapper.build(depth)
+    ok = np.isfinite(nx)
+    assert ok.mean() > 0.5
+    # Independent check with the 3-D ray tracer at the sampled depth.
+    _, K_inv = matrix_K(c["fx"], c["fy"], c["cx"], c["cy"])
+    from core.optics import normalize_batch, refract_batch, intersect_plane_batch
+    u, v = nx[ok], ny[ok]
+    rays = normalize_batch(np.stack([u, v, np.ones_like(u)], -1) @ K_inv.T)
+    n = np.asarray(housing["n_port"], float)
+    n = n / np.linalg.norm(n)
+    P1 = intersect_plane_batch(np.zeros(3), rays, n * housing["d0"], n)
+    rg = refract_batch(rays, n, housing["mu_a"], housing["mu_g"])
+    P2 = intersect_plane_batch(P1, rg, n * (housing["d0"] + housing["tglass"]), n)
+    rw = refract_batch(rg, n, housing["mu_g"], housing["mu_w"])
+    # The depth map is interpolated (bilinearly) in 1 / (Z - c), the model's inverse depth.
+    Z = cz + 1.0 / InvDepth(np.asarray(depth, np.float64) - cz, c["fx"], c["fy"], c["cx"],
+                            c["cy"]).sample((u - c["cx"]) / c["fx"], (v - c["cy"]) / c["fy"])
+    t = (Z - P2[:, 2]) / rw[:, 2]
+    Pw = P2 + t[:, None] * rw
+    out_W, out_H, (ox, oy) = canvas
+    jj, ii = np.meshgrid(np.arange(out_W), np.arange(out_H))
+    qx = c["fx"] * zoom * Pw[:, 0] / (Pw[:, 2] - cz) + c["cx"] - ox
+    qy = c["fy"] * zoom * Pw[:, 1] / (Pw[:, 2] - cz) + c["cy"] - oy
+    res = np.hypot(qx - jj[ok], qy - ii[ok])
+    assert np.percentile(res, 99.9) < 1e-5, res.max()
