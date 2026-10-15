@@ -74,11 +74,14 @@ impact the refraction?"*
      point error 4.1 → 0.7 mm (tank) and 17.8 → 4.3 mm (reef).
    * **What that refractive BA recovers:** tilt to 0.07–0.13°, against a 0.5° prior. d0
      and μ_w are not identifiable, but they do not need to be.
-   * **Real gopro10** (pycolmap global BA from explore/depth's models): weighted and
-     unweighted BA are indistinguishable. Board planarity is 0.152–0.167 % against
-     0.155–0.162 %, and |κ| ≤ 0.0034 in all variants. On this scene the systematic errors
-     are absorbed, and the 1.9 px corner-noise floor (explore/depth) dominates. The patched
-     COLMAP mapper results are in §5.3.
+   * **Real gopro10** was run two ways: a weighted global BA (pycolmap) from
+     explore/depth's z0 = 1 m and z0 = 0.4 m models, and the patched colmap-uncertainty
+     **mapper** run end to end with the exported maps. In both, weighted and unweighted
+     are indistinguishable. Board planarity is 0.14–0.17 % in all runs, and the
+     run-to-run spread of identical plain mappings is ±0.01 %. |κ| is ≤ 0.004 at z0 = 1 m.
+   * On this scene, refining the intrinsics is what matters. With the wrong z0 = 0.4 m it
+     repairs κ from −0.009 to −0.007. The focal grows by +12 px, exactly what §2 predicts
+     for the absorbed depth error.
 
 **Recommendations.**
 1. **Calibrate (or estimate) the port tilt.** Measure it in water once per housing and
@@ -419,7 +422,28 @@ z0 = 0.4 m (deliberately wrong prior; the scene is at ~1 m), camera centre:
 
 ### 5.3 Real data: patched COLMAP mapper
 
-REAL_MAPPER
+The colmap-uncertainty build (COLMAP 4.2.1 + per-keypoint covariances in every BA of the
+incremental mapper) became available during this work. `uncertainty/real_mapper.sh` takes
+the same database (explore/depth z0 = 1 m features and matches). It imports `cov/shared.npy`
+with `--detector-sigma 0.5` through colmap-uncertainty's `import_covariance_maps.py`, then
+maps with 4 threads, with intrinsics fixed and refined:
+
+| mapper run | registered | points | track | reproj mean / RMS | board rel. RMSE % | κ | fx, cx |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| plain, fixed K | 128 | 42 876 | 13.90 | 0.592 / 0.794 | 0.145 | −0.0030 | 1390.9, 849.3 |
+| **covariance-weighted**, fixed K | 128 | 42 821 | 13.92 | 0.608 / 0.816 | 0.151 | −0.0033 | 1390.9, 849.3 |
+| plain, refined K | 128 | 42 874 | 13.91 | 0.577 / 0.782 | 0.140 | −0.0028 | 1396.9, 859.4 |
+| **covariance-weighted**, refined K | 128 | 42 832 | 13.91 | 0.592 / 0.802 | 0.148 | −0.0039 | 1395.3, 859.2 |
+
+(Times: 134–164 s per run, +3 % with covariances.)
+
+* **Run-to-run noise sets the scale.** The plain fixed-K run uses the same data as
+  explore/depth's model, with 4 threads instead of 6. It lands at 0.145 % against 0.162 %.
+  So ±0.01 % of planarity is run-to-run noise on this scene.
+* **Weighted mapping is within that noise:** 0.151 vs 0.145 % and 0.148 vs 0.140 %, κ
+  unchanged. The mapper registers the same images and points with the same tracks.
+* **Conclusion for gopro10:** no measurable effect, positive or negative. Refining the
+  intrinsics is again the lever (0.140 %, the best value).
 
 ## 6. How SLAM / COLMAP should use this
 

@@ -74,6 +74,7 @@ def evaluate(d, cov, board):
     r = pl.fit_quadric(pl.analyze(Xb))
     out = dict(reproj_mean=float(n.mean()), reproj_rms=float(np.sqrt((n ** 2).mean())),
                maha_mean=float(M.mean()), n_obs=int(len(n)), board_pts=int(len(Xb)),
+               n_images=len(imgs), n_points=len(pts), track=float(len(n) / len(pts)),
                plan_rel_rmse_pct=float(np.sqrt(np.mean(r["dist"] ** 2)) / r["D"] * 100),
                kappa=float(r["c3"] * r["D"]), intr=[fx, fy, cx, cy])
     return out
@@ -93,10 +94,12 @@ def main():
         json.dump(res, open(os.path.join(prep, "eval.json"), "w"), indent=1)
         print(prep)
         print(f"{'variant':16s} {'reproj mean':>11s} {'rms':>7s} {'maha':>7s} "
-              f"{'board relRMSE%':>14s} {'kappa':>8s}  fx, fy, cx, cy")
+              f"{'board relRMSE%':>14s} {'kappa':>8s} {'imgs':>5s} {'points':>7s} {'track':>6s}"
+              "  fx, fy, cx, cy")
         for v, r in res.items():
             print(f"{v:16s} {r['reproj_mean']:11.4f} {r['reproj_rms']:7.4f} "
-                  f"{r['maha_mean']:7.3f} {r['plan_rel_rmse_pct']:14.4f} {r['kappa']:8.4f}  "
+                  f"{r['maha_mean']:7.3f} {r['plan_rel_rmse_pct']:14.4f} {r['kappa']:8.4f} "
+                  f"{r['n_images']:5d} {r['n_points']:7d} {r['track']:6.2f}  "
                   + ", ".join(f"{x:.2f}" for x in r["intr"]))
 
 
