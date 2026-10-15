@@ -37,3 +37,9 @@ correction:
                           # point shifts accordingly); false = clip to the source W x H
   step_size: 1            # process every n-th image
   crop_valid_bbox: true   # crop to the largest rectangle without invalid pixels
+  depth_crop: reference   # depth mode: keep the crop/intrinsics of z0_fixed for every image
+                          # (one calibration file); per_image = old per-image crop
+  virtual_center: 0.0     # optical-axis position of the corrected pinhole (m); "auto" puts it
+                          # where the water rays nearly converge (~-10 mm here), which makes the
+                          # correction ~6x less depth-dependent (docs/explore_depth.md)
+  # depth_range: [0.5, 8.0]  # depth range used by virtual_center: auto

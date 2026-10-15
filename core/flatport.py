@@ -36,6 +36,14 @@ samples (scipy griddata), the equation is solved per output pixel:
 * tilted n_port: 2-D damped Newton iteration with a finite-difference Jacobian.
 
 Both converge to ~1e-9 px; pixels whose solution lies outside the source frame are NaN.
+
+Virtual centre
+--------------
+With the corrected pinhole at (0, 0, c) on the optical axis instead of the camera centre
+(correction.virtual_center, see core/virtual_center.py), the point at depth Z projects to
+(A Z + B) / (Z - c) = A + (B + c A) w' with w' = 1 / (Z - c): the same model with
+B -> B + c A and w -> 1 / (Z - c). FlatPort(center_z=c) applies the first substitution,
+and callers pass depth - c as the depth (InverseMapper and forward_map_analytic do this).
 """
 import numpy as np
 
@@ -59,13 +67,16 @@ def _rotation_to_z(n):
 class FlatPort:
     """Analytic flat-port refraction model F(p, w) = A(p) + B(p) w (normalised coordinates)."""
 
-    def __init__(self, n_port, d0, tglass, mu_a, mu_g, mu_w):
+    def __init__(self, n_port, d0, tglass, mu_a, mu_g, mu_w, center_z=0.0):
         n = np.asarray(n_port, dtype=np.float64)
         self.n = n / np.linalg.norm(n)
         self.R = _rotation_to_z(self.n)
         self.radial = bool(self.n[0] == 0.0 and self.n[1] == 0.0 and self.n[2] > 0)
         self.d0, self.tglass = float(d0), float(tglass)
         self.dz = self.d0 + self.tglass
+        # Virtual centre: B -> B + c A, i.e. the port exit is measured from z = c.
+        self.cz = float(center_z)
+        self.dzc = self.dz - self.cz
         self.rg, self.rw = mu_a / mu_g, mu_a / mu_w
         self.cg, self.cw = 1.0 - self.rg ** 2, 1.0 - self.rw ** 2
 
@@ -80,12 +91,12 @@ class FlatPort:
     def radial_gain(self, s, w):
         """g(s, w) with F = p * g for n_port on the axis, and d(rho * g)/d rho."""
         kg, kw = self._k(s)
-        h = self.d0 + self.tglass * kg - self.dz * kw
+        h = self.d0 + self.tglass * kg - self.dzc * kw
         g = kw + w * h
         # d(rho k)/d rho = k / (1 + c s)
         dkw = kw / (1.0 + self.cw * s)
         dkg = kg / (1.0 + self.cg * s)
-        dg = dkw + w * (self.d0 + self.tglass * dkg - self.dz * dkw)
+        dg = dkw + w * (self.d0 + self.tglass * dkg - self.dzc * dkw)
         return g, dg, h
 
     # -- forward model ------------------------------------------------------------------
@@ -95,7 +106,7 @@ class FlatPort:
         y = np.asarray(y, dtype=np.float64)
         if self.radial:
             kg, kw = self._k(x * x + y * y)
-            h = self.d0 + self.tglass * kg - self.dz * kw
+            h = self.d0 + self.tglass * kg - self.dzc * kw
             return x * kw, y * kw, x * h, y * h
         R = self.R
         # Ray direction (x, y, 1) in the port frame, as tangent vector t' = d'_xy / d'_z.
@@ -116,6 +127,7 @@ class FlatPort:
         pz = Rt[2, 0] * a * tx + Rt[2, 1] * a * ty + Rt[2, 2] * self.dz
         with np.errstate(invalid="ignore", divide="ignore"):
             Ax, Ay = wx / wz, wy / wz
+        pz = pz - self.cz
         return Ax, Ay, px - pz * Ax, py - pz * Ay
 
     def forward(self, x, y, w):

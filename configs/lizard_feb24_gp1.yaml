@@ -1,0 +1,46 @@
+# GoPro HERO11 Black "GoPro1" (8:7 photo, 5568x4872 downscaled 6x to 928x812) behind the flat
+# port of the Lizard Island ASV, LIRS Feb 2024, South Palfrey 1 (docs/explore_lizard.md, section 9).
+# camera   the Mar'24 GoPro1 self-calibration (configs/lizard_gp11.yaml), NOT this survey's own:
+#          Feb's own COLMAP self-calibration gives f_w = 602.0 / 601.3 (2 % above Mar), and with
+#          f_air = f_w / 1.34 every z0 leaves a bowl (sag +2.1 m at z0 = 5.7, +3.0 m at 1.9). With
+#          the Mar intrinsics the z0 sweep crosses zero (section 9.3).
+# housing  nominal: d0 = 2 cm, tglass = 2 mm, mu_w = 1.34.
+# z0       flatness-tuned on the Feb stretch G0021364-G0022563: 2.8 m (sag -584 mm at 5.7, +529 mm
+#          at 1.9, linear in 1/z0; checked with a run at 2.8: +1 mm). The scene has two levels,
+#          1.9 m (coral) and 5.7 m (sand).
+
+camera:
+  W: 928
+  H: 812
+  fx: 440.2180
+  fy: 440.6268
+  cx: 466.0478
+  cy: 404.7711
+  k1: 0.000000
+  k2: 0.000000
+  p1: 0.000000
+  p2: 0.000000
+
+housing:
+  n_port: [0.0, 0.0, 1.0]
+  mu_a: 1.0
+  mu_g: 1.47
+  mu_w: 1.34
+  d0: 0.02
+  tglass: 0.002
+
+paths:
+  rgb_dir: "/Users/fischert/robot/refrax-work/lizard2/feb/raw928"
+  output_dir: "/Users/fischert/robot/refrax-work/lizard2/feb/corrected/images"
+  mask_dir: "/Users/fischert/robot/refrax-work/lizard2/feb/corrected/mask"
+  depth_dir: null
+
+correction:
+  z0_fixed: 2.8
+  zoom: null
+  fit_canvas: true
+  step_size: 1
+  crop_valid_bbox: true
+  depth_crop: reference
+  virtual_center: 0.0
+  depth_range: [1.0, 8.0]
