@@ -1,7 +1,7 @@
 """Removes flat-port refraction from underwater images.
 
 Usage:
-    python remove_refraction.py configs/dataset.yaml [--overwrite]
+    python remove_refraction.py configs/dataset.yaml [--overwrite] [--device numba|cpu|mps|cuda]
 
 Every image in paths.rgb_dir is warped to a refraction-free pinhole image with
 focal length zoom * (fx, fy). The output is sized to hold the whole corrected
@@ -48,15 +48,34 @@ def load_depth(name, depth_dir, W, H):
     return np.clip(depth, 1e-3, None)
 
 
-def make_map_builder(W, H, fx, fy, cx, cy, housing, distortion, zoom, canvas=None):
+def make_map_builder(W, H, fx, fy, cx, cy, housing, distortion, zoom, canvas=None,
+                     device="numba", z_ref=1.0):
     """Returns build_map(depth) -> (map_x, map_y), float32 maps for cv2.remap.
 
     The maps cover canvas = (out_W, out_H, origin), the source frame by default.
     Pixels without a source are set to -1. If radtan distortion coefficients are
     non-zero, the map points into the distorted (raw) image. depth is a scalar or a
     per-source-pixel depth map (H x W).
+
+    device: "numba" (CPU kernel, default) or a torch device ("cpu", "mps", "cuda") for
+    depth maps (core.torch_remove; constant depths always use the CPU kernel). z_ref:
+    depth of the torch solver's precomputed initial guess.
     """
     mapper = InverseMapper(W, H, fx, fy, cx, cy, housing, zoom, canvas)
+    if device != "numba":
+        import torch
+        from core.torch_remove import TorchInverse
+        tinv = TorchInverse(W, H, fx, fy, cx, cy, housing, zoom, canvas, distortion,
+                            device=device, z_ref=z_ref)
+
+        def build_map(depth):
+            if np.ndim(depth) == 0:
+                return mapper.remap_maps(depth, distortion)
+            d = torch.as_tensor(np.asarray(depth, np.float32), device=tinv.device)[None]
+            mx, my = tinv.remap_maps(d)
+            return mx[0].cpu().numpy(), my[0].cpu().numpy()
+
+        return build_map
 
     def build_map(depth):
         return mapper.remap_maps(depth, distortion)
@@ -124,6 +143,9 @@ def main():
                         help="Recompute images whose output already exists")
     parser.add_argument("--workers", type=int, default=min(8, os.cpu_count() or 1),
                         help="Threads for image reading, warping and PNG writing")
+    parser.add_argument("--device", default="numba",
+                        help="Depth-map solver: numba (CPU kernel, default) or a torch device "
+                             "(cpu, mps, cuda) for core.torch_remove")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -162,7 +184,9 @@ def main():
 
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(mask_dir, exist_ok=True)
-    build_map = make_map_builder(W, H, fx, fy, cx, cy, housing, distortion, zoom, canvas)
+    build_map = make_map_builder(W, H, fx, fy, cx, cy, housing, distortion, zoom, canvas,
+                                 device=args.device if depth_dir is not None else "numba",
+                                 z_ref=z0_fixed)
 
     rgb_paths = find_rgb_paths(rgb_dir, step_size)
     print(f"Found {len(rgb_paths)} images (step={step_size}), "
